@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V10", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V11", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -267,7 +267,7 @@ def broker_calls_from_news(broker, symbols, limit=20):
 def fundamentals_for_stock(sym):
     try:
         info=yf.Ticker(sym+".NS").info or {}
-        keys=["revenueGrowth","earningsGrowth","returnOnEquity","operatingMargins","debtToEquity","currentRatio","freeCashflow","operatingCashflow","trailingPE","profitMargins","marketCap","longName","sector","industry","longBusinessSummary","website","city","country","companyOfficers","heldPercentInstitutions","heldPercentInsiders"]
+        keys=["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets","operatingMargins","grossMargins","ebitdaMargins","debtToEquity","currentRatio","quickRatio","freeCashflow","operatingCashflow","trailingPE","forwardPE","priceToBook","bookValue","trailingEps","forwardEps","dividendYield","beta","profitMargins","marketCap","enterpriseValue","totalRevenue","fullTimeEmployees","longName","sector","industry","longBusinessSummary","website","city","country","companyOfficers","heldPercentInstitutions","heldPercentInsiders"]
         return {k:info.get(k) for k in keys}
     except Exception:
         return {}
@@ -530,6 +530,8 @@ def render_company_overview(sym,finfo):
     sector=finfo.get("sector") or "N/A"
     industry=finfo.get("industry") or "N/A"
     website=finfo.get("website") or ""
+    city=finfo.get("city") or ""
+    country=finfo.get("country") or ""
     business=_short_business(finfo.get("longBusinessSummary"))
 
     officers=finfo.get("companyOfficers") or []
@@ -541,34 +543,131 @@ def render_company_overview(sym,finfo):
 
     inst=finfo.get("heldPercentInstitutions")
     insider=finfo.get("heldPercentInsiders")
-    promoter=sh.get("promoter_holding"); fii=sh.get("fii_holding"); dii=sh.get("dii_holding"); public=sh.get("public_holding")
+    promoter=sh.get("promoter_holding")
+    fii=sh.get("fii_holding")
+    dii=sh.get("dii_holding")
+    public=sh.get("public_holding")
 
     def pctv(v): return "N/A" if v is None else f"{float(v):.2f}%"
+    def pct100(v): return "N/A" if v is None else f"{float(v)*100:.2f}%"
+    def num(v,dec=2):
+        try:
+            if v is None or not np.isfinite(float(v)): return "N/A"
+            return f"{float(v):,.{dec}f}"
+        except Exception:return "N/A"
+    def rupee_crore(v):
+        try:
+            if v is None or not np.isfinite(float(v)): return "N/A"
+            return f"₹{float(v)/1e7:,.0f} Cr"
+        except Exception:return "N/A"
+    def compact_money(v):
+        try:
+            if v is None or not np.isfinite(float(v)): return "N/A"
+            x=float(v)
+            if abs(x)>=1e12:return f"₹{x/1e12:.2f} T"
+            if abs(x)>=1e9:return f"₹{x/1e9:.2f} B"
+            if abs(x)>=1e7:return f"₹{x/1e7:.0f} Cr"
+            return f"₹{x:,.0f}"
+        except Exception:return "N/A"
+
+    market_cap=finfo.get("marketCap")
+    enterprise=finfo.get("enterpriseValue")
+    employees=finfo.get("fullTimeEmployees")
+    location=", ".join([x for x in [city,country] if x]) or "N/A"
 
     st.markdown("## 🏢 Company Overview")
-    st.markdown('<div class="company-hero">'+
-                f'<h2>{html.escape(company)}</h2>'+
-                f'<p><b>{html.escape(sector)}</b> · {html.escape(industry)}</p>'+
-                '</div>',unsafe_allow_html=True)
+    st.markdown(
+        '<div class="company-hero">'+
+        f'<h2>{html.escape(company)}</h2>'+
+        f'<p><b>{html.escape(sector)}</b> · {html.escape(industry)} · {html.escape(location)}</p>'+
+        '</div>',unsafe_allow_html=True
+    )
 
-    st.markdown('<div class="company-grid">'+
-                f'<div class="company-mini"><span>Promoter Holding</span><b>{pctv(promoter)}</b></div>'+
-                f'<div class="company-mini"><span>FII Holding</span><b>{pctv(fii)}</b></div>'+
-                f'<div class="company-mini"><span>DII Holding</span><b>{pctv(dii)}</b></div>'+
-                f'<div class="company-mini"><span>Public Holding</span><b>{pctv(public)}</b></div>'+
-                '</div>',unsafe_allow_html=True)
+    # Identity / size
+    st.markdown("### 🏷️ Business & Size")
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Sector</span><b>{html.escape(sector)}</b></div>'+
+        f'<div class="company-mini"><span>Industry</span><b>{html.escape(industry)}</b></div>'+
+        f'<div class="company-mini"><span>Market Cap</span><b>{rupee_crore(market_cap)}</b></div>'+
+        f'<div class="company-mini"><span>Enterprise Value</span><b>{rupee_crore(enterprise)}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
 
-    inst_txt="N/A" if inst is None else f"{float(inst)*100:.2f}%"
-    insider_txt="N/A" if insider is None else f"{float(insider)*100:.2f}%"
-    st.markdown('<div class="company-grid">'+
-                f'<div class="company-mini"><span>Institutional Holding</span><b>{inst_txt}</b></div>'+
-                f'<div class="company-mini"><span>Insider / Promoter Proxy</span><b>{insider_txt}</b></div>'+
-                f'<div class="company-mini"><span>Latest Shareholding Quarter</span><b>{html.escape(str(sh.get("quarter","N/A")))}</b></div>'+
-                f'<div class="company-mini"><span>Key Person</span><b>{html.escape(str(key_person))}</b></div>'+
-                '</div>',unsafe_allow_html=True)
+    # Ownership
+    st.markdown("### 👥 Ownership")
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Promoter Holding</span><b>{pctv(promoter)}</b></div>'+
+        f'<div class="company-mini"><span>FII Holding</span><b>{pctv(fii)}</b></div>'+
+        f'<div class="company-mini"><span>DII Holding</span><b>{pctv(dii)}</b></div>'+
+        f'<div class="company-mini"><span>Public Holding</span><b>{pctv(public)}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Institutional Holding</span><b>{pct100(inst)}</b></div>'+
+        f'<div class="company-mini"><span>Insider / Promoter Proxy</span><b>{pct100(insider)}</b></div>'+
+        f'<div class="company-mini"><span>Shareholding Quarter</span><b>{html.escape(str(sh.get("quarter","N/A")))}</b></div>'+
+        f'<div class="company-mini"><span>Key Person</span><b>{html.escape(str(key_person))}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
 
-    st.markdown('<div class="company-section"><h3>💼 What business does it do?</h3>'+
-                f'<p style="color:#b9cde2;font-size:11px;line-height:1.7">{html.escape(business)}</p></div>',unsafe_allow_html=True)
+    # Valuation & profitability
+    st.markdown("### 💹 Valuation & Profitability")
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Trailing P/E</span><b>{num(finfo.get("trailingPE"))}</b></div>'+
+        f'<div class="company-mini"><span>Forward P/E</span><b>{num(finfo.get("forwardPE"))}</b></div>'+
+        f'<div class="company-mini"><span>Price / Book</span><b>{num(finfo.get("priceToBook"))}</b></div>'+
+        f'<div class="company-mini"><span>Book Value / Share</span><b>{num(finfo.get("bookValue"))}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>EPS TTM</span><b>{num(finfo.get("trailingEps"))}</b></div>'+
+        f'<div class="company-mini"><span>Forward EPS</span><b>{num(finfo.get("forwardEps"))}</b></div>'+
+        f'<div class="company-mini"><span>ROE</span><b>{pct100(finfo.get("returnOnEquity"))}</b></div>'+
+        f'<div class="company-mini"><span>ROA</span><b>{pct100(finfo.get("returnOnAssets"))}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
+
+    # Growth / margins
+    st.markdown("### 📈 Growth & Margins")
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Revenue Growth</span><b>{pct100(finfo.get("revenueGrowth"))}</b></div>'+
+        f'<div class="company-mini"><span>Earnings Growth</span><b>{pct100(finfo.get("earningsGrowth"))}</b></div>'+
+        f'<div class="company-mini"><span>Operating Margin</span><b>{pct100(finfo.get("operatingMargins"))}</b></div>'+
+        f'<div class="company-mini"><span>Profit Margin</span><b>{pct100(finfo.get("profitMargins"))}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
+
+    # Financial strength / trading characteristics
+    st.markdown("### 🧾 Financial Strength & Market Characteristics")
+    emp_txt="N/A" if employees is None else f"{int(employees):,}"
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Debt / Equity</span><b>{num(finfo.get("debtToEquity"))}</b></div>'+
+        f'<div class="company-mini"><span>Current Ratio</span><b>{num(finfo.get("currentRatio"))}</b></div>'+
+        f'<div class="company-mini"><span>Beta</span><b>{num(finfo.get("beta"))}</b></div>'+
+        f'<div class="company-mini"><span>Employees</span><b>{emp_txt}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
+    st.markdown(
+        '<div class="company-grid">'+
+        f'<div class="company-mini"><span>Dividend Yield</span><b>{pct100(finfo.get("dividendYield"))}</b></div>'+
+        f'<div class="company-mini"><span>Free Cash Flow</span><b>{compact_money(finfo.get("freeCashflow"))}</b></div>'+
+        f'<div class="company-mini"><span>Operating Cash Flow</span><b>{compact_money(finfo.get("operatingCashflow"))}</b></div>'+
+        f'<div class="company-mini"><span>Total Revenue</span><b>{compact_money(finfo.get("totalRevenue"))}</b></div>'+
+        '</div>',unsafe_allow_html=True
+    )
+
+    st.markdown(
+        '<div class="company-section"><h3>💼 What business does it do?</h3>'+
+        f'<p style="color:#b9cde2;font-size:11px;line-height:1.7">{html.escape(business)}</p></div>',
+        unsafe_allow_html=True
+    )
 
     if key_title:
         st.caption(f"Key management: {key_person} — {key_title}. Exact promoter names may require the official shareholding filing.")
@@ -577,10 +676,12 @@ def render_company_overview(sym,finfo):
     st.markdown('<div class="company-section"><h3>📰 Latest News — Short</h3>',unsafe_allow_html=True)
     if news:
         for n in news:
-            st.markdown('<div class="news-short">'+
-                        f'<b>{html.escape(n.get("title",""))}</b>'+
-                        f'<span>{html.escape(n.get("source",""))} · {html.escape(n.get("published",""))}</span>'+
-                        '</div>',unsafe_allow_html=True)
+            st.markdown(
+                '<div class="news-short">'+
+                f'<b>{html.escape(n.get("title",""))}</b>'+
+                f'<span>{html.escape(n.get("source",""))} · {html.escape(n.get("published",""))}</span>'+
+                '</div>',unsafe_allow_html=True
+            )
     else:
         st.markdown('<div class="news-short"><span>No recent matching news found.</span></div>',unsafe_allow_html=True)
     st.markdown('</div>',unsafe_allow_html=True)
@@ -865,140 +966,201 @@ elif page=="🎯 Brokerage Calls":
         st.info("Target and symbol are parsed only when clearly present in public news text. Blank means not confidently detected.")
 
 elif page=="🌐 All NSE Performance":
-    st.markdown("""<div class="hero"><div class="eyebrow">MARKET-WIDE NSE SCANNER</div>
-    <h1>🌐 NSE Performance Command Center</h1>
-    <p>Find leaders, laggards, momentum, breakouts and trend quality across NSE — then inspect any candidate in Pro Analyzer.</p></div>""",unsafe_allow_html=True)
+    st.markdown("""<div class="hero"><div class="eyebrow">NSE PERFORMANCE</div>
+    <h1>🌐 All NSE Performance</h1>
+    <p>Choose the familiar Excel-style table or the advanced scanner. Both use the same internet market data.</p></div>""",unsafe_allow_html=True)
 
-    c1,c2,c3,c4=st.columns(4)
-    c1.metric("NSE Universe",f"{len(universe()):,}")
-    c2.metric("Scanner","Price + Momentum")
-    c3.metric("Periods","1D → 5Y")
-    c4.metric("Drill-down","Pro Analyzer")
+    view=st.radio(
+        "Choose view",
+        ["📋 Classic Table (Excel Style)","⚡ Smart Scanner"],
+        horizontal=True,
+        key="allnse_view"
+    )
 
-    st.markdown("### ⚡ Quick Market Scans")
-    q1,q2,q3,q4,q5,q6=st.columns(6)
-    quick=None
-    if q1.button("🔥 Momentum",use_container_width=True): quick="momentum"
-    if q2.button("🏆 1M Leaders",use_container_width=True): quick="1m"
-    if q3.button("🚀 6M Leaders",use_container_width=True): quick="6m"
-    if q4.button("🎯 Near 52W High",use_container_width=True): quick="high"
-    if q5.button("📉 Oversold",use_container_width=True): quick="oversold"
-    if q6.button("🧱 Strong Trend",use_container_width=True): quick="trend"
-    if quick: st.session_state["allnse_quick"]=quick
+    if view=="📋 Classic Table (Excel Style)":
+        st.markdown("## 📋 Classic Performance Table")
+        st.caption("This is the previous Excel-style view: choose a column and sort the whole table by that column.")
 
-    st.markdown("### 🎛️ Build Your Scanner")
-    f1,f2,f3,f4=st.columns(4)
-    stock_n=f1.selectbox("Stocks",[50,100,250,500,1000],index=1,key="allnse_n")
-    history=f2.selectbox("History",["1y","2y","5y"],index=2,key="allnse_history")
-    rank_by=f3.selectbox("Rank by",["1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","% of 52W High","Volume"],index=2,key="allnse_rank")
-    direction=f4.selectbox("Direction",["Highest first","Lowest first"],key="allnse_dir")
-
-    g1,g2,g3,g4=st.columns(4)
-    min_price=g1.number_input("Minimum price ₹",min_value=0.0,value=20.0,step=10.0)
-    min_volume=g2.number_input("Minimum volume",min_value=0,value=100000,step=50000)
-    rsi_zone=g3.selectbox("RSI filter",["All","40–60 Balanced","50–70 Momentum","60–75 Strong","Below 35 Oversold","Above 75 Overbought"])
-    trend_filter=g4.selectbox("Trend filter",["All","Price > SMA20","Price > SMA50","SMA20 > SMA50","SMA50 > SMA200","Price > SMA20 > SMA50"])
-
-    build=st.button("⚡ Scan NSE Market",type="primary",use_container_width=True)
-
-    if st.session_state.get("allnse_quick") or build:
-        with st.spinner("Scanning NSE stocks..."):
-            symbols=universe()[:int(stock_n)]
-            df=bulk_snapshot(tuple(symbols),history)
-
-        if df is None or df.empty:
-            st.warning("No market data returned. Try again.")
+        c1,c2,c3,c4=st.columns(4)
+        stock_choice=c1.selectbox("Stocks",[100,250,500,1000,"All NSE"],index=0,key="classic_n")
+        history=c2.selectbox("History",["1y","2y","5y"],index=2,key="classic_history")
+        sort_by=c3.selectbox(
+            "Sort by",
+            ["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20"],
+            index=2,
+            key="classic_sort"
+        )
+        if sort_by=="Symbol":
+            order_options=["A → Z","Z → A"]
         else:
-            d=df.copy()
-            nums=["Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume"]
-            for col in nums:
-                if col in d.columns: d[col]=pd.to_numeric(d[col],errors="coerce")
+            order_options=["Largest → Smallest","Smallest → Largest"]
+        order=c4.selectbox("Order",order_options,key="classic_order")
 
-            if "Latest" in d.columns: d=d[d["Latest"]>=min_price]
-            if "Volume" in d.columns and min_volume>0: d=d[d["Volume"]>=min_volume]
+        if st.button("📊 Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
+            syms=universe()
+            use_syms=syms if stock_choice=="All NSE" else syms[:int(stock_choice)]
+            with st.spinner(f"Loading {len(use_syms):,} NSE stocks..."):
+                st.session_state["classic_df"]=bulk_snapshot(tuple(use_syms),history)
 
-            if rsi_zone!="All" and "RSI14" in d.columns:
-                if rsi_zone=="40–60 Balanced": d=d[d["RSI14"].between(40,60)]
-                elif rsi_zone=="50–70 Momentum": d=d[d["RSI14"].between(50,70)]
-                elif rsi_zone=="60–75 Strong": d=d[d["RSI14"].between(60,75)]
-                elif rsi_zone=="Below 35 Oversold": d=d[d["RSI14"]<35]
-                elif rsi_zone=="Above 75 Overbought": d=d[d["RSI14"]>75]
+        classic=st.session_state.get("classic_df")
+        if isinstance(classic,pd.DataFrame) and not classic.empty:
+            d=classic.copy()
+            if sort_by=="Symbol":
+                d=d.sort_values("Symbol",ascending=(order=="A → Z"),na_position="last")
+            elif sort_by in d.columns:
+                d[sort_by]=pd.to_numeric(d[sort_by],errors="coerce")
+                d=d.sort_values(sort_by,ascending=(order=="Smallest → Largest"),na_position="last")
 
-            if trend_filter!="All":
-                if trend_filter=="Price > SMA20": d=d[d["Latest"].gt(d["SMA20"])]
-                elif trend_filter=="Price > SMA50": d=d[d["Latest"].gt(d["SMA50"])]
-                elif trend_filter=="SMA20 > SMA50": d=d[d["SMA20"].gt(d["SMA50"])]
-                elif trend_filter=="SMA50 > SMA200": d=d[d["SMA50"].gt(d["SMA200"])]
-                elif trend_filter=="Price > SMA20 > SMA50": d=d[d["Latest"].gt(d["SMA20"]) & d["SMA20"].gt(d["SMA50"])]
+            classic_cols=["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20"]
+            classic_cols=[c for c in classic_cols if c in d.columns]
 
-            quick=st.session_state.pop("allnse_quick",None)
-            scan_title="Custom NSE Scan"
-            if quick=="momentum":
-                scan_title="🔥 Momentum Leaders"
-                d=d[d["RSI14"].between(55,72) & (d["1W %"]>0) & (d["1M %"]>0)]
-                rank_by="1M %";direction="Highest first"
-            elif quick=="1m":
-                scan_title="🏆 One-Month Leaders";rank_by="1M %";direction="Highest first"
-            elif quick=="6m":
-                scan_title="🚀 Six-Month Leaders";rank_by="6M %";direction="Highest first"
-            elif quick=="high":
-                scan_title="🎯 Stocks Nearest 52-Week High"
-                d=d[d["% of 52W High"].between(90,101)]
-                rank_by="% of 52W High";direction="Highest first"
-            elif quick=="oversold":
-                scan_title="📉 RSI Oversold Watch"
-                d=d[d["RSI14"]<35];rank_by="RSI14";direction="Lowest first"
-            elif quick=="trend":
-                scan_title="🧱 Strong Trend Alignment"
-                d=d[d["Latest"].gt(d["SMA20"]) & d["SMA20"].gt(d["SMA50"]) & d["SMA50"].gt(d["SMA200"])]
-                rank_by="1M %";direction="Highest first"
+            h1,h2,h3=st.columns(3)
+            h1.metric("Rows",f"{len(d):,}")
+            h2.metric("Sorted By",sort_by)
+            h3.metric("Order",order)
 
-            if rank_by in d.columns:
-                d=d.sort_values(rank_by,ascending=(direction=="Lowest first"),na_position="last")
+            st.dataframe(clean_display(d[classic_cols]),use_container_width=True,height=700,hide_index=True)
 
-            def quality(r):
-                score=0
-                try:
-                    if r["Latest"]>r["SMA20"]: score+=1
-                    if r["SMA20"]>r["SMA50"]: score+=1
-                    if r["SMA50"]>r["SMA200"]: score+=1
-                    if r["1W %"]>0: score+=1
-                    if r["1M %"]>0: score+=1
-                    if 50<=r["RSI14"]<=70: score+=1
-                    if r["% of 52W High"]>=90: score+=1
-                except Exception: pass
-                return score
-            d["Quality /7"]=d.apply(quality,axis=1)
+            st.markdown("### 🧠 Inspect a Candidate")
+            a1,a2=st.columns([3,1])
+            selected=a1.selectbox("Select stock for full analysis",d["Symbol"].astype(str).tolist(),key="classic_selected")
+            if a2.button("Open Pro Analyzer →",type="primary",use_container_width=True,key="classic_open_pro"):
+                st.query_params.clear()
+                st.query_params["page"]="pro"
+                st.query_params["stock"]=selected
+                st.rerun()
+            st.caption("Open the selected stock's chart, technical/fundamental checklist, time-horizon ratings, company overview, holdings and latest news.")
+            st.download_button("⬇️ Export Classic Table CSV",d[classic_cols].to_csv(index=False).encode(),"nse_classic_performance.csv","text/csv")
+        else:
+            st.info("Choose the table size/history and click **Build / Refresh Classic Table**.")
 
-            st.markdown(f"### {scan_title}")
-            st.caption("Quality /7 is a rule-based trend/momentum checklist, not a BUY/SELL recommendation.")
-
-            if not d.empty:
-                s1,s2,s3,s4=st.columns(4)
-                s1.metric("Matches",len(d))
-                s2.metric("Top Stock",str(d.iloc[0]["Symbol"]))
-                topval=d.iloc[0][rank_by] if rank_by in d.columns else None
-                s3.metric(f"Top {rank_by}",f"{topval:.2f}" if pd.notna(topval) else "—")
-                s4.metric("Top Quality",f'{int(d["Quality /7"].max())}/7')
-
-            display_cols=["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","Quality /7","% of 52W High","Volume"]
-            display_cols=[c for c in display_cols if c in d.columns]
-            st.dataframe(clean_display(d[display_cols].head(int(stock_n))),use_container_width=True,height=620,hide_index=True)
-
-            if not d.empty:
-                st.markdown("### 🧠 Inspect a Candidate")
-                a1,a2=st.columns([3,1])
-                selected=a1.selectbox("Select stock for full analysis",d["Symbol"].astype(str).head(int(stock_n)).tolist(),key="allnse_selected")
-                if a2.button("Open Pro Analyzer →",type="primary",use_container_width=True):
-                    st.query_params.clear()
-                    st.query_params["page"]="pro"
-                    st.query_params["stock"]=selected
-                    st.rerun()
-                st.caption("Open the candidate's chart, technical/fundamental checklist, horizon ratings, risk levels, company overview, holdings and news.")
-
-            st.download_button("⬇️ Export scan CSV",d.to_csv(index=False).encode(),"nse_performance_scan.csv","text/csv")
     else:
-        st.info("Choose a Quick Market Scan or set your filters and click **Scan NSE Market**.")
+        st.markdown("## ⚡ Smart Scanner")
+        st.caption("Use filters and quick scans to shortlist NSE candidates before opening Pro Analyzer.")
+
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("NSE Universe",f"{len(universe()):,}")
+        c2.metric("Scanner","Price + Momentum")
+        c3.metric("Periods","1D → 5Y")
+        c4.metric("Drill-down","Pro Analyzer")
+
+        st.markdown("### ⚡ Quick Market Scans")
+        q1,q2,q3,q4,q5,q6=st.columns(6)
+        quick=None
+        if q1.button("🔥 Momentum",use_container_width=True,key="smart_momentum"): quick="momentum"
+        if q2.button("🏆 1M Leaders",use_container_width=True,key="smart_1m"): quick="1m"
+        if q3.button("🚀 6M Leaders",use_container_width=True,key="smart_6m"): quick="6m"
+        if q4.button("🎯 Near 52W High",use_container_width=True,key="smart_high"): quick="high"
+        if q5.button("📉 Oversold",use_container_width=True,key="smart_oversold"): quick="oversold"
+        if q6.button("🧱 Strong Trend",use_container_width=True,key="smart_trend"): quick="trend"
+        if quick: st.session_state["allnse_quick"]=quick
+
+        st.markdown("### 🎛️ Build Your Scanner")
+        f1,f2,f3,f4=st.columns(4)
+        stock_n=f1.selectbox("Stocks",[50,100,250,500,1000],index=1,key="allnse_n")
+        history=f2.selectbox("History",["1y","2y","5y"],index=2,key="allnse_history")
+        rank_by=f3.selectbox("Rank by",["1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","% of 52W High","Volume"],index=2,key="allnse_rank")
+        direction=f4.selectbox("Direction",["Highest first","Lowest first"],key="allnse_dir")
+
+        g1,g2,g3,g4=st.columns(4)
+        min_price=g1.number_input("Minimum price ₹",min_value=0.0,value=20.0,step=10.0,key="smart_min_price")
+        min_volume=g2.number_input("Minimum volume",min_value=0,value=100000,step=50000,key="smart_min_vol")
+        rsi_zone=g3.selectbox("RSI filter",["All","40–60 Balanced","50–70 Momentum","60–75 Strong","Below 35 Oversold","Above 75 Overbought"],key="smart_rsi")
+        trend_filter=g4.selectbox("Trend filter",["All","Price > SMA20","Price > SMA50","SMA20 > SMA50","SMA50 > SMA200","Price > SMA20 > SMA50"],key="smart_trend_filter")
+
+        build=st.button("⚡ Scan NSE Market",type="primary",use_container_width=True,key="smart_build")
+
+        if st.session_state.get("allnse_quick") or build:
+            with st.spinner("Scanning NSE stocks..."):
+                symbols=universe()[:int(stock_n)]
+                df=bulk_snapshot(tuple(symbols),history)
+
+            if df is None or df.empty:
+                st.warning("No market data returned. Try again.")
+            else:
+                d=df.copy()
+                nums=["Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume"]
+                for col in nums:
+                    if col in d.columns:d[col]=pd.to_numeric(d[col],errors="coerce")
+
+                if "Latest" in d.columns:d=d[d["Latest"]>=min_price]
+                if "Volume" in d.columns and min_volume>0:d=d[d["Volume"]>=min_volume]
+
+                if rsi_zone!="All" and "RSI14" in d.columns:
+                    if rsi_zone=="40–60 Balanced":d=d[d["RSI14"].between(40,60)]
+                    elif rsi_zone=="50–70 Momentum":d=d[d["RSI14"].between(50,70)]
+                    elif rsi_zone=="60–75 Strong":d=d[d["RSI14"].between(60,75)]
+                    elif rsi_zone=="Below 35 Oversold":d=d[d["RSI14"]<35]
+                    elif rsi_zone=="Above 75 Overbought":d=d[d["RSI14"]>75]
+
+                if trend_filter!="All":
+                    if trend_filter=="Price > SMA20":d=d[d["Latest"].gt(d["SMA20"])]
+                    elif trend_filter=="Price > SMA50":d=d[d["Latest"].gt(d["SMA50"])]
+                    elif trend_filter=="SMA20 > SMA50":d=d[d["SMA20"].gt(d["SMA50"])]
+                    elif trend_filter=="SMA50 > SMA200":d=d[d["SMA50"].gt(d["SMA200"])]
+                    elif trend_filter=="Price > SMA20 > SMA50":d=d[d["Latest"].gt(d["SMA20"]) & d["SMA20"].gt(d["SMA50"])]
+
+                quick=st.session_state.pop("allnse_quick",None)
+                scan_title="Custom NSE Scan"
+                if quick=="momentum":
+                    scan_title="🔥 Momentum Leaders"
+                    d=d[d["RSI14"].between(55,72) & (d["1W %"]>0) & (d["1M %"]>0)]
+                    rank_by="1M %";direction="Highest first"
+                elif quick=="1m":
+                    scan_title="🏆 One-Month Leaders";rank_by="1M %";direction="Highest first"
+                elif quick=="6m":
+                    scan_title="🚀 Six-Month Leaders";rank_by="6M %";direction="Highest first"
+                elif quick=="high":
+                    scan_title="🎯 Stocks Nearest 52-Week High"
+                    d=d[d["% of 52W High"].between(90,101)]
+                    rank_by="% of 52W High";direction="Highest first"
+                elif quick=="oversold":
+                    scan_title="📉 RSI Oversold Watch";d=d[d["RSI14"]<35];rank_by="RSI14";direction="Lowest first"
+                elif quick=="trend":
+                    scan_title="🧱 Strong Trend Alignment"
+                    d=d[d["Latest"].gt(d["SMA20"]) & d["SMA20"].gt(d["SMA50"]) & d["SMA50"].gt(d["SMA200"])]
+                    rank_by="1M %";direction="Highest first"
+
+                if rank_by in d.columns:d=d.sort_values(rank_by,ascending=(direction=="Lowest first"),na_position="last")
+
+                def quality(r):
+                    score=0
+                    try:
+                        if r["Latest"]>r["SMA20"]:score+=1
+                        if r["SMA20"]>r["SMA50"]:score+=1
+                        if r["SMA50"]>r["SMA200"]:score+=1
+                        if r["1W %"]>0:score+=1
+                        if r["1M %"]>0:score+=1
+                        if 50<=r["RSI14"]<=70:score+=1
+                        if r["% of 52W High"]>=90:score+=1
+                    except Exception:pass
+                    return score
+                d["Quality /7"]=d.apply(quality,axis=1)
+
+                st.markdown(f"### {scan_title}")
+                st.caption("Quality /7 is a trend/momentum checklist, not a BUY/SELL recommendation.")
+                if not d.empty:
+                    s1,s2,s3,s4=st.columns(4)
+                    s1.metric("Matches",len(d));s2.metric("Top Stock",str(d.iloc[0]["Symbol"]))
+                    topval=d.iloc[0][rank_by] if rank_by in d.columns else None
+                    s3.metric(f"Top {rank_by}",f"{topval:.2f}" if pd.notna(topval) else "—")
+                    s4.metric("Top Quality",f'{int(d["Quality /7"].max())}/7')
+
+                display_cols=["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","Quality /7","% of 52W High","Volume"]
+                display_cols=[c for c in display_cols if c in d.columns]
+                st.dataframe(clean_display(d[display_cols].head(int(stock_n))),use_container_width=True,height=620,hide_index=True)
+
+                if not d.empty:
+                    st.markdown("### 🧠 Inspect a Candidate")
+                    a1,a2=st.columns([3,1])
+                    selected=a1.selectbox("Select stock for full analysis",d["Symbol"].astype(str).head(int(stock_n)).tolist(),key="allnse_selected")
+                    if a2.button("Open Pro Analyzer →",type="primary",use_container_width=True,key="smart_open_pro"):
+                        st.query_params.clear();st.query_params["page"]="pro";st.query_params["stock"]=selected;st.rerun()
+                    st.caption("Open the candidate's chart, technical/fundamental checklist, horizon ratings, company overview, holdings and latest news.")
+
+                st.download_button("⬇️ Export scan CSV",d.to_csv(index=False).encode(),"nse_performance_scan.csv","text/csv")
+        else:
+            st.info("Choose a Quick Market Scan or set your filters and click **Scan NSE Market**.")
 
 elif page=="🏦 Institutional Watch":
     st.markdown("## 🏦 Institutional / FII-DII Watch")
