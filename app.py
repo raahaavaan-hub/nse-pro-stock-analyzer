@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V5", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -16,6 +16,25 @@ st.markdown("""
 .kpi{padding:16px;border-radius:14px;background:#0d1726;border:1px solid #1e293b;min-height:110px}.kpi span,.kpi small{display:block}.kpi span{font-size:9px;color:#7f91a8;font-weight:900}.kpi b{display:block;font-size:24px;margin:9px 0}.kpi small{font-size:9px;color:#94a3b8}
 .signal{padding:18px;border-radius:15px;background:#0b1523;border:1px solid #1e293b;min-height:260px}.badge{display:inline-block;padding:9px 14px;border-radius:8px;font-weight:900;background:#16a34a;margin:8px 0}.factor{padding:8px 10px;background:#0d1726;border-left:3px solid #334155;border-radius:7px;margin:7px 0;font-size:11px}
 .card{padding:16px;border-radius:14px;background:#0b1523;border:1px solid #1e293b}
+</style>
+
+<style>
+.score-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+.score-panel{background:#0b1523;border:1px solid #1e293b;border-radius:16px;padding:18px}
+.score-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.score-head h3{margin:0;font-size:21px}.score-pill{min-width:88px;text-align:center;padding:8px 12px;border-radius:999px;background:#172554;color:#bfdbfe;font-weight:900;font-size:16px}
+.check-row{display:grid;grid-template-columns:24px 1fr auto;gap:8px;align-items:center;padding:9px 8px;border-bottom:1px solid #182334;font-size:11px}
+.check-row:last-child{border-bottom:0}.check-row .status{font-size:16px}.check-row .value{color:#94a3b8;font-size:10px;text-align:right}
+.rating-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}
+.rating-card{background:linear-gradient(145deg,#0b1523,#101c2c);border:1px solid #1e293b;border-radius:15px;padding:17px;min-height:150px}
+.rating-card span,.rating-card small{display:block}.rating-card span{font-size:9px;color:#94a3b8;font-weight:900;letter-spacing:.5px}
+.rating-card b{display:inline-block;margin:11px 0 8px;padding:7px 12px;border-radius:8px;font-size:19px}.rating-card small{font-size:10px;color:#94a3b8;line-height:1.45}
+.rating-buy{background:#14532d;color:#86efac}.rating-hold{background:#78350f;color:#fde68a}.rating-no{background:#7f1d1d;color:#fecaca}
+.overall-score-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0}
+.overall-score-box{padding:13px;border-radius:12px;background:#0d1726;border:1px solid #1e293b;text-align:center}
+.overall-score-box span{display:block;font-size:9px;color:#94a3b8}.overall-score-box b{display:block;font-size:23px;margin-top:5px}
+@media(max-width:900px){.score-grid{grid-template-columns:1fr}.rating-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.rating-grid,.overall-score-strip{grid-template-columns:1fr}}
 </style>
 
 <style>
@@ -240,15 +259,207 @@ def broker_calls_from_news(broker, symbols, limit=20):
                      "Status":status,"Source":n["source"],"Link":n["link"]})
     return rows
 
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fundamentals_for_stock(sym):
+    try:
+        info=yf.Ticker(sym+".NS").info or {}
+        keys=["revenueGrowth","earningsGrowth","returnOnEquity","operatingMargins","debtToEquity","currentRatio","freeCashflow","operatingCashflow","trailingPE","profitMargins","marketCap","longName","sector","industry"]
+        return {k:info.get(k) for k in keys}
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def intraday_stock(sym):
+    try:
+        d=yf.download(sym+".NS",period="5d",interval="15m",auto_adjust=False,progress=False,threads=False)
+        if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
+        if d is None or d.empty:return pd.DataFrame()
+        return d[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
+    except Exception:
+        return pd.DataFrame()
+
+def _pct_display(v):
+    try:
+        if v is None or not np.isfinite(float(v)): return "N/A"
+        return f"{float(v)*100:.1f}%"
+    except Exception:return "N/A"
+
+def _num_display(v):
+    try:
+        if v is None or not np.isfinite(float(v)): return "N/A"
+        return f"{float(v):,.2f}"
+    except Exception:return "N/A"
+
+def fundamental_checklist(info):
+    checks=[]
+    def add(name,val,passed,display,neutral=False):
+        checks.append({"name":name,"value":display,"passed":passed,"neutral":neutral})
+    rg=info.get("revenueGrowth"); add("Revenue growth > 10%",rg,rg is not None and rg>0.10,_pct_display(rg),rg is None)
+    eg=info.get("earningsGrowth"); add("Earnings growth > 10%",eg,eg is not None and eg>0.10,_pct_display(eg),eg is None)
+    roe=info.get("returnOnEquity"); add("ROE >= 15%",roe,roe is not None and roe>=0.15,_pct_display(roe),roe is None)
+    om=info.get("operatingMargins"); add("Operating margin >= 10%",om,om is not None and om>=0.10,_pct_display(om),om is None)
+    de=info.get("debtToEquity"); add("Debt / Equity <= 100",de,de is not None and de<=100,_num_display(de),de is None)
+    cr=info.get("currentRatio"); add("Current ratio >= 1.2",cr,cr is not None and cr>=1.2,_num_display(cr),cr is None)
+    fcf=info.get("freeCashflow"); add("Free cash flow positive",fcf,fcf is not None and fcf>0,"Positive" if fcf is not None and fcf>0 else ("Negative" if fcf is not None else "N/A"),fcf is None)
+    ocf=info.get("operatingCashflow"); add("Operating cash flow positive",ocf,ocf is not None and ocf>0,"Positive" if ocf is not None and ocf>0 else ("Negative" if ocf is not None else "N/A"),ocf is None)
+    pe=info.get("trailingPE"); add("P/E between 0 and 40",pe,pe is not None and pe>0 and pe<=40,_num_display(pe),pe is None)
+    pm=info.get("profitMargins"); add("Profit margin >= 8%",pm,pm is not None and pm>=0.08,_pct_display(pm),pm is None)
+    score=sum(1 if c["passed"] else (0.5 if c["neutral"] else 0) for c in checks)
+    return checks,round(score,1)
+
+def technical_checklist(x):
+    last=x.iloc[-1]; close=float(last["Close"]); w=pct(x["Close"],5); m=pct(x["Close"],21)
+    avg_vol=float(x["Volume"].tail(20).mean()) if len(x)>=5 else np.nan; vol=float(x["Volume"].iloc[-1]); up20=int((x["Close"].diff().tail(20)>0).sum())
+    checks=[]
+    def add(name,passed,display,neutral=False):checks.append({"name":name,"value":display,"passed":bool(passed) if not neutral else False,"neutral":neutral})
+    sma20=last["SMA20"]; sma50=last["SMA50"]; sma200=last["SMA200"]; ema9=last["EMA9"]; ema20=last["EMA20"]; rsi=last["RSI14"]
+    add("Price > SMA20",pd.notna(sma20) and close>sma20,f"Rs {sma20:.2f}" if pd.notna(sma20) else "N/A",pd.isna(sma20))
+    add("Price > SMA50",pd.notna(sma50) and close>sma50,f"Rs {sma50:.2f}" if pd.notna(sma50) else "N/A",pd.isna(sma50))
+    add("SMA50 > SMA200",pd.notna(sma50) and pd.notna(sma200) and sma50>sma200,f"{sma50:.1f} > {sma200:.1f}" if pd.notna(sma50) and pd.notna(sma200) else "N/A",pd.isna(sma50) or pd.isna(sma200))
+    add("EMA9 > EMA20",pd.notna(ema9) and pd.notna(ema20) and ema9>ema20,f"{ema9:.1f} > {ema20:.1f}" if pd.notna(ema9) and pd.notna(ema20) else "N/A",pd.isna(ema9) or pd.isna(ema20))
+    add("MACD bullish",pd.notna(last["MACD"]) and pd.notna(last["MACDS"]) and last["MACD"]>last["MACDS"],f"{last['MACD']:.2f} / {last['MACDS']:.2f}")
+    add("RSI healthy: 50-70",pd.notna(rsi) and 50<=rsi<=70,f"{rsi:.1f}" if pd.notna(rsi) else "N/A",pd.isna(rsi))
+    add("1-week return positive",np.isfinite(w) and w>0,f"{w:+.2f}%" if np.isfinite(w) else "N/A",not np.isfinite(w))
+    add("1-month return positive",np.isfinite(m) and m>0,f"{m:+.2f}%" if np.isfinite(m) else "N/A",not np.isfinite(m))
+    add("Volume > 20-day average",np.isfinite(avg_vol) and avg_vol>0 and vol>avg_vol,f"{vol/avg_vol:.2f}x avg" if np.isfinite(avg_vol) and avg_vol>0 else "N/A",not np.isfinite(avg_vol))
+    add("11+ up days in last 20",up20>=11,f"{up20}/20 up days")
+    score=sum(1 if c["passed"] else (0.5 if c["neutral"] else 0) for c in checks)
+    return checks,round(score,1)
+
+def render_checklist(title,checks,score):
+    st.markdown(f'<div class="score-panel"><div class="score-head"><h3>{title}</h3><div class="score-pill">{score:.1f}/10</div></div>',unsafe_allow_html=True)
+    for c in checks:
+        icon="✅" if c["passed"] else ("⚪" if c["neutral"] else "❌")
+        st.markdown('<div class="check-row">'+f'<span class="status">{icon}</span>'+f'<span>{html.escape(c["name"])}</span>'+f'<span class="value">{html.escape(str(c["value"]))}</span>'+'</div>',unsafe_allow_html=True)
+    st.markdown('</div>',unsafe_allow_html=True)
+
+def _rating(score,buy_at,hold_at):
+    if score>=buy_at:return "BUY","rating-buy"
+    if score>=hold_at:return "HOLD","rating-hold"
+    return "NO","rating-no"
+
+def horizon_ratings(x,fundamental_score,intraday_df):
+    last=x.iloc[-1]; close=float(last["Close"]); rsi=float(last["RSI14"]) if pd.notna(last["RSI14"]) else np.nan
+    w=pct(x["Close"],5); m=pct(x["Close"],21); six=pct(x["Close"],126); yr=pct(x["Close"],252)
+    intra_score=0; intra_notes=[]
+    if intraday_df is not None and not intraday_df.empty and len(intraday_df)>=10:
+        z=intraday_df.copy(); z["EMA9"]=z["Close"].ewm(span=9,adjust=False).mean(); z["EMA20"]=z["Close"].ewm(span=20,adjust=False).mean()
+        dd=z["Close"].diff(); gg=dd.clip(lower=0).ewm(alpha=1/14,adjust=False).mean(); ll=(-dd.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean(); z["RSI"]=100-100/(1+gg/ll.replace(0,np.nan)); li=z.iloc[-1]
+        if li["Close"]>li["EMA9"]: intra_score+=1; intra_notes.append("Price > 15m EMA9")
+        if li["EMA9"]>li["EMA20"]: intra_score+=1; intra_notes.append("EMA9 > EMA20")
+        if pd.notna(li["RSI"]) and 50<=li["RSI"]<=70: intra_score+=1; intra_notes.append(f"15m RSI {li['RSI']:.1f}")
+        if z["Close"].iloc[-1]>z["Close"].iloc[-2]: intra_score+=1; intra_notes.append("Latest 15m candle positive")
+        if len(z)>=20 and z["Volume"].iloc[-1]>z["Volume"].tail(20).mean(): intra_score+=1; intra_notes.append("Volume confirmation")
+        il,ic=_rating(intra_score,4,2)
+    else: il,ic="HOLD","rating-hold"; intra_notes=["Intraday feed unavailable"]
+    ws=0; wn=[]
+    if np.isfinite(w) and w>0:ws+=1;wn.append(f"1W {w:+.1f}%")
+    if close>last["EMA9"]:ws+=1;wn.append("Price > EMA9")
+    if last["MACD"]>last["MACDS"]:ws+=1;wn.append("MACD bullish")
+    if np.isfinite(rsi) and 50<=rsi<=70:ws+=1;wn.append(f"RSI {rsi:.1f}")
+    if np.isfinite(rsi) and rsi>80:ws-=2;wn.append("Extremely overbought")
+    wl,wc=_rating(ws,3,1)
+    ms=0; mn=[]
+    if np.isfinite(m) and m>0:ms+=1;mn.append(f"1M {m:+.1f}%")
+    if pd.notna(last["SMA20"]) and close>last["SMA20"]:ms+=1;mn.append("Price > SMA20")
+    if pd.notna(last["SMA50"]) and close>last["SMA50"]:ms+=1;mn.append("Price > SMA50")
+    if last["MACD"]>last["MACDS"]:ms+=1;mn.append("MACD bullish")
+    if np.isfinite(rsi) and rsi>80:ms-=1;mn.append("Overbought risk")
+    ml,mc=_rating(ms,3,1)
+    ls=0; ln=[]
+    if pd.notna(last["SMA200"]) and close>last["SMA200"]:ls+=1;ln.append("Price > SMA200")
+    if pd.notna(last["SMA50"]) and pd.notna(last["SMA200"]) and last["SMA50"]>last["SMA200"]:ls+=1;ln.append("SMA50 > SMA200")
+    if np.isfinite(six) and six>0:ls+=1;ln.append(f"6M {six:+.1f}%")
+    if np.isfinite(yr) and yr>0:ls+=1;ln.append(f"1Y {yr:+.1f}%")
+    if fundamental_score>=6.5:ls+=2;ln.append(f"Fundamental {fundamental_score:.1f}/10")
+    elif fundamental_score>=5:ls+=1;ln.append(f"Fundamental {fundamental_score:.1f}/10")
+    ll,lc=_rating(ls,4,2)
+    return [("INTRADAY",il,ic,intra_notes),("1 WEEK",wl,wc,wn),("1 MONTH",ml,mc,mn),("LONG TERM",ll,lc,ln)]
+
+
+st.markdown("""
+<style>
+/* V5 PRESENTATION UPGRADE */
+[data-testid="stAppViewContainer"]{
+  background:
+    radial-gradient(circle at 82% 8%,rgba(37,99,235,.18),transparent 30%),
+    radial-gradient(circle at 18% 82%,rgba(14,165,233,.10),transparent 30%),
+    linear-gradient(180deg,#07111f 0%,#081522 50%,#07101b 100%)!important;
+}
+[data-testid="stSidebar"]{
+  background:linear-gradient(180deg,#07101c,#0b1827)!important;
+  border-right:1px solid #23405f!important;
+}
+[data-testid="stSidebar"] h2{color:#f8fafc!important;font-weight:900!important;letter-spacing:.7px}
+[data-testid="stSidebar"] label,[data-testid="stSidebar"] p,[data-testid="stSidebar"] span{color:#dbeafe!important}
+[data-testid="stSidebar"] [role="radiogroup"] label{padding:8px 10px!important;border-radius:10px!important;margin:2px 0!important}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover{background:#13263b!important}
+
+.hero{
+  position:relative!important;overflow:hidden!important;padding:34px!important;
+  border:1px solid #2b5279!important;
+  background:linear-gradient(120deg,rgba(7,17,31,.96),rgba(16,38,67,.92))!important;
+  box-shadow:0 20px 45px rgba(2,8,23,.30)!important;
+}
+.hero:after{
+  content:"";position:absolute;right:-55px;top:-75px;width:250px;height:250px;border-radius:50%;
+  background:radial-gradient(circle,#38bdf844,transparent 67%);
+}
+.hero h1{color:#fff!important;font-size:46px!important;line-height:1.05!important}
+.hero p{color:#cbd5e1!important;font-size:15px!important;max-width:760px}
+.eyebrow{color:#67e8f9!important;background:#083344;padding:6px 9px;border-radius:999px;display:inline-block}
+
+.kpi{
+  min-height:125px!important;padding:18px!important;border:1px solid #294866!important;
+  background:linear-gradient(145deg,#0b1928,#10243a)!important;
+  box-shadow:0 10px 24px rgba(2,8,23,.18)!important;
+}
+.kpi span{color:#93c5fd!important;font-size:10px!important}
+.kpi b{color:#fff!important;font-size:25px!important}
+.kpi small{color:#a8bdd3!important;font-size:10px!important}
+
+.score-panel{
+  background:linear-gradient(145deg,#0b1928,#0e2034)!important;
+  border:1px solid #294866!important;box-shadow:0 12px 28px rgba(2,8,23,.18)!important;
+}
+.score-head h3{color:#f8fafc!important}
+.score-pill{background:linear-gradient(135deg,#1d4ed8,#0891b2)!important;color:#fff!important}
+.check-row{border-bottom-color:#1d334a!important}
+.check-row .value{color:#93c5fd!important}
+
+.overall-score-box{background:linear-gradient(145deg,#0d1d2e,#112840)!important;border-color:#2c5276!important}
+.overall-score-box:nth-child(1){border-top:3px solid #22c55e!important}
+.overall-score-box:nth-child(2){border-top:3px solid #38bdf8!important}
+.overall-score-box:nth-child(3){border-top:3px solid #a78bfa!important}
+
+.rating-card{
+  background:linear-gradient(145deg,#0b1928,#10243a)!important;
+  border-color:#294866!important;box-shadow:0 10px 24px rgba(2,8,23,.15)!important;
+}
+.rating-card span{color:#93c5fd!important}
+.rating-card small{color:#b6c8d9!important}
+.rating-buy{background:#14532d!important;color:#bbf7d0!important}
+.rating-hold{background:#713f12!important;color:#fde68a!important}
+.rating-no{background:#7f1d1d!important;color:#fecaca!important}
+
+.stButton>button{border-radius:10px!important;font-weight:800!important}
+</style>
+""", unsafe_allow_html=True)
+
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"])
 
 if page=="🏠 Dashboard":
-    st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>One terminal. Less manual work.</h1><p>Analyze stocks, scan swing setups and stop typing closing prices by hand.</p></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
     c=st.columns(4)
-    vals=[("PRO ANALYZER","Internet OHLCV","Single stock"),("SWING LIBRARY",str(len(SCREENERS))+" presets","Rule-based"),("PERFORMANCE","1D → 5Y","All NSE"),("MANUAL FEEDING","0","Refresh + export")]
+    vals=[("🧠 PRO ANALYZER","10 + 10 Score","Fundamental + Technical"),
+          ("🚀 SWING LIBRARY",str(len(SCREENERS))+" Screeners","Momentum & Breakout"),
+          ("📰 MARKET INTEL","News + Calls","Events & Broker Targets"),
+          ("🌐 NSE PERFORMANCE","1D → 5Y","Automatic Market Data")]
     for col,v in zip(c,vals):
-        with col:st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
+        with col:
+            st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
 elif page=="🧠 Pro Analyzer":
     syms=universe();sym=st.selectbox("NSE symbol",syms,index=syms.index("TBZ") if "TBZ" in syms else 0);period=st.select_slider("Period",["3mo","6mo","1y","2y","5y"],value="1y")
@@ -296,17 +507,34 @@ elif page=="🧠 Pro Analyzer":
             if warnings:
                 st.markdown('<div class="risk-box"><b>Risk checks:</b><br>'+ "<br>".join(warnings) +'</div>', unsafe_allow_html=True)
 
-            a,b=st.columns(2)
-            with a:
-                st.markdown("### 🎯 Medium-Term Investment")
-                st.markdown(f'<div class="badge">{label}</div>',unsafe_allow_html=True)
-                [st.markdown(f'<div class="factor">{f}</div>',unsafe_allow_html=True) for f in factors]
-                [st.markdown(f'<div class="factor">{w}</div>',unsafe_allow_html=True) for w in warnings[:3]]
-            with b:
-                st.markdown("### ⚡ Short-Term Swing")
-                swing_factors=(factors[-3:] if len(factors)>=3 else factors)
-                [st.markdown(f'<div class="factor">{f}</div>',unsafe_allow_html=True) for f in swing_factors]
-                [st.markdown(f'<div class="factor">{w}</div>',unsafe_allow_html=True) for w in warnings[:2]]
+            with st.spinner("Loading fundamentals and intraday confirmation..."):
+                finfo=fundamentals_for_stock(sym)
+                intraday_df=intraday_stock(sym)
+
+            fundamental_checks,fundamental_score=fundamental_checklist(finfo)
+            technical_checks,technical_score=technical_checklist(x)
+
+            st.markdown("## ✅ Fundamental & Technical Scorecard")
+            left,right=st.columns(2)
+            with left:render_checklist("🏢 Fundamental Checklist",fundamental_checks,fundamental_score)
+            with right:render_checklist("📊 Technical Checklist",technical_checks,technical_score)
+
+            overall=(fundamental_score+technical_score)/2
+            st.markdown('<div class="overall-score-strip">'+
+                        f'<div class="overall-score-box"><span>Fundamental</span><b>{fundamental_score:.1f}/10</b></div>'+
+                        f'<div class="overall-score-box"><span>Technical</span><b>{technical_score:.1f}/10</b></div>'+
+                        f'<div class="overall-score-box"><span>Overall</span><b>{overall:.1f}/10</b></div>'+
+                        '</div>',unsafe_allow_html=True)
+
+            st.markdown("## ⏱️ Buy / Hold / No by Time Horizon")
+            ratings=horizon_ratings(x,fundamental_score,intraday_df)
+            rcols=st.columns(4)
+            for rc,(horizon,rating,rcls,notes) in zip(rcols,ratings):
+                with rc:
+                    note_text=" · ".join(notes[:3]) if notes else "No confirmation"
+                    st.markdown('<div class="rating-card">'+f'<span>{horizon}</span>'+f'<b class="{rcls}">{rating}</b>'+f'<small>{html.escape(note_text)}</small>'+'</div>',unsafe_allow_html=True)
+
+            st.caption("BUY / HOLD / NO is a rule-based signal from available market and fundamental data, not a guarantee or personalized investment recommendation.")
             atr=float(x.ATR14.iloc[-1]);stop=latest-1.5*atr;risk=latest-stop;t1=latest+1.5*risk;t2=latest+3*risk
             st.markdown("### 🛡️ Trade Execution & Risk")
             cs=st.columns(5)
