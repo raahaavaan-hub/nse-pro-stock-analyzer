@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V6", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V7", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -586,7 +586,7 @@ def render_company_overview(sym,finfo):
     if sh.get("source_url"): st.caption("Shareholding source: Screener public company page (best-effort parsing).")
 
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"])
+page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 if page=="🏠 Dashboard":
     st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
@@ -600,8 +600,18 @@ if page=="🏠 Dashboard":
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
 elif page=="🧠 Pro Analyzer":
-    syms=universe();sym=st.selectbox("NSE symbol",syms,index=syms.index("TBZ") if "TBZ" in syms else 0);period=st.select_slider("Period",["3mo","6mo","1y","2y","5y"],value="1y")
-    if st.button("⚡ Analyze",type="primary"):
+    syms=universe()
+    if "analyzer_symbol" not in st.session_state:
+        st.session_state["analyzer_symbol"]="TBZ" if "TBZ" in syms else syms[0]
+    elif st.session_state["analyzer_symbol"] not in syms:
+        st.session_state["analyzer_symbol"]="TBZ" if "TBZ" in syms else syms[0]
+
+    sym=st.selectbox("NSE symbol",syms,key="analyzer_symbol")
+    period=st.select_slider("Period",["3mo","6mo","1y","2y","5y"],value=st.session_state.get("analyzer_period","1y"),key="analyzer_period")
+    analyze_clicked=st.button("⚡ Analyze",type="primary")
+    auto_analyze=bool(st.session_state.pop("auto_analyze",False))
+
+    if analyze_clicked or auto_analyze:
         with st.spinner("Fetching market data..."):d=one_stock(sym,period)
         if d.empty:st.error("No data returned. Try again.")
         else:
@@ -715,12 +725,28 @@ elif page=="🚀 Swing Screeners":
                     f'<div class="pick-card"><span class="pick-badge">Score {int(r["Score"])}</span><b>{r["Symbol"]}</b><span>₹{r["Latest"]:.2f}</span><small>1W {r["1W %"]:+.2f}% · 1M {r["1M %"]:+.2f}% · RSI {r["RSI14"]:.1f}</small><small>{risk}</small></div>',
                     unsafe_allow_html=True
                 )
+                if st.button(f'🔎 Open {r["Symbol"]} in Pro Analyzer',key=f'open_pick_{r["Symbol"]}',use_container_width=True):
+                    st.session_state["analyzer_symbol"]=r["Symbol"]
+                    st.session_state["analyzer_period"]="1y"
+                    st.session_state["auto_analyze"]=True
+                    st.session_state["main_page"]="🧠 Pro Analyzer"
+                    st.rerun()
 
     name=st.selectbox("Preset",list(SCREENERS));st.info(SCREENERS[name]);size=st.selectbox("Universe size",[100,250,500,1000,"All"],index=1)
     if st.button("🔥 Run Screener",type="primary"):
         syms=universe();syms=syms if size=="All" else syms[:int(size)]
         with st.spinner("Downloading market history in batches..."):snap=bulk_snapshot(tuple(syms),"1y");res=run_screen(snap,name)
-        res=clean_display(res);st.dataframe(res,use_container_width=True,height=600,hide_index=True);st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
+        res=clean_display(res)
+        st.dataframe(res,use_container_width=True,height=600,hide_index=True)
+        if not res.empty:
+            chosen_symbol=st.selectbox("Open a matched stock in Pro Analyzer",res["Symbol"].astype(str).tolist(),key="screen_result_symbol")
+            if st.button("🧠 Open Selected Stock Analysis",type="primary",use_container_width=True):
+                st.session_state["analyzer_symbol"]=chosen_symbol
+                st.session_state["analyzer_period"]="1y"
+                st.session_state["auto_analyze"]=True
+                st.session_state["main_page"]="🧠 Pro Analyzer"
+                st.rerun()
+        st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
 
 
 elif page=="📰 Stock News":
