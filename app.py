@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V5", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V6", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -264,7 +264,7 @@ def broker_calls_from_news(broker, symbols, limit=20):
 def fundamentals_for_stock(sym):
     try:
         info=yf.Ticker(sym+".NS").info or {}
-        keys=["revenueGrowth","earningsGrowth","returnOnEquity","operatingMargins","debtToEquity","currentRatio","freeCashflow","operatingCashflow","trailingPE","profitMargins","marketCap","longName","sector","industry"]
+        keys=["revenueGrowth","earningsGrowth","returnOnEquity","operatingMargins","debtToEquity","currentRatio","freeCashflow","operatingCashflow","trailingPE","profitMargins","marketCap","longName","sector","industry","longBusinessSummary","website","city","country","companyOfficers","heldPercentInstitutions","heldPercentInsiders"]
         return {k:info.get(k) for k in keys}
     except Exception:
         return {}
@@ -447,6 +447,144 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+st.markdown("""
+<style>
+/* V6 COMPANY OVERVIEW */
+.company-hero{padding:22px;border-radius:16px;background:linear-gradient(135deg,#0a1b2c,#123152);border:1px solid #2e5b85}
+.company-hero h2{margin:0 0 6px;color:#fff}.company-hero p{margin:0;color:#b9cde2;font-size:11px;line-height:1.6}
+.company-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0}
+.company-mini{padding:14px;border-radius:12px;background:#0c1c2c;border:1px solid #294866}
+.company-mini span{display:block;font-size:8px;color:#7fb7e5;font-weight:900;text-transform:uppercase}.company-mini b{display:block;font-size:17px;color:#fff;margin-top:5px}
+.company-section{margin-top:12px;padding:16px;border-radius:14px;background:#0b1928;border:1px solid #294866}
+.company-section h3{margin:0 0 10px;color:#f8fafc}
+.news-short{padding:10px 12px;margin:7px 0;border-radius:9px;background:#10243a;border-left:3px solid #38bdf8}
+.news-short b{display:block;color:#fff;font-size:11px}.news-short span{display:block;color:#9fb6cb;font-size:9px;margin-top:4px}
+@media(max-width:900px){.company-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.company-grid{grid-template-columns:1fr}}
+</style>
+""", unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def screener_shareholding(sym):
+    try:
+        s=requests.Session()
+        s.headers.update({"User-Agent":"Mozilla/5.0"})
+        q=s.get("https://www.screener.in/api/company/search/?q="+quote_plus(sym),timeout=12)
+        q.raise_for_status()
+        results=q.json()
+        if not results:return {}
+        url=results[0].get("url","")
+        if not url:return {}
+        h=s.get("https://www.screener.in"+url,timeout=12)
+        h.raise_for_status()
+        htmltxt=h.text
+        m=re.search(r"<section[^>]+id=['\"]shareholding['\"][\\s\\S]*?</section>",htmltxt,re.I)
+        section=m.group(0) if m else htmltxt
+        rows=re.findall(r"<tr[^>]*>([\\s\\S]*?)</tr>",section,re.I)
+        parsed=[]
+        for row in rows:
+            cells=re.findall(r"<t[hd][^>]*>([\\s\\S]*?)</t[hd]>",row,re.I)
+            clean=[re.sub(r"\\s+"," ",re.sub(r"<[^>]+>"," ",c)).strip() for c in cells]
+            if clean:parsed.append(clean)
+        if not parsed:return {}
+        header=parsed[0]
+        latest_q=header[-1] if len(header)>1 else "Latest"
+        out={"quarter":latest_q,"source_url":"https://www.screener.in"+url}
+        for row in parsed[1:]:
+            if len(row)<2:continue
+            name=row[0].lower(); val=row[-1]
+            mm=re.search(r"([0-9]+(?:\\.[0-9]+)?)",val.replace(",",""))
+            num=float(mm.group(1)) if mm else None
+            if "promoter" in name: out["promoter_holding"]=num
+            elif "fii" in name: out["fii_holding"]=num
+            elif "dii" in name: out["dii_holding"]=num
+            elif "public" in name: out["public_holding"]=num
+        return out
+    except Exception:
+        return {}
+
+def _short_business(text,limit=520):
+    t=re.sub(r"\\s+"," ",str(text or "")).strip()
+    if not t:return "Business summary unavailable from the current data source."
+    return t if len(t)<=limit else t[:limit].rsplit(" ",1)[0]+"…"
+
+def _company_latest_news(sym,company_name,limit=3):
+    q=(company_name or sym)+" stock India NSE"
+    rows=google_news_rss(q,limit=limit+3)
+    out=[];seen=set()
+    for n in rows:
+        title=n.get("title","").strip()
+        if not title or title in seen:continue
+        seen.add(title);out.append(n)
+        if len(out)>=limit:break
+    return out
+
+def render_company_overview(sym,finfo):
+    sh=screener_shareholding(sym)
+    company=finfo.get("longName") or sym
+    sector=finfo.get("sector") or "N/A"
+    industry=finfo.get("industry") or "N/A"
+    website=finfo.get("website") or ""
+    business=_short_business(finfo.get("longBusinessSummary"))
+
+    officers=finfo.get("companyOfficers") or []
+    key_person="N/A"; key_title=""
+    if isinstance(officers,list):
+        for o in officers:
+            if isinstance(o,dict) and o.get("name"):
+                key_person=o.get("name"); key_title=o.get("title") or ""; break
+
+    inst=finfo.get("heldPercentInstitutions")
+    insider=finfo.get("heldPercentInsiders")
+    promoter=sh.get("promoter_holding"); fii=sh.get("fii_holding"); dii=sh.get("dii_holding"); public=sh.get("public_holding")
+
+    def pctv(v): return "N/A" if v is None else f"{float(v):.2f}%"
+
+    st.markdown("## 🏢 Company Overview")
+    st.markdown('<div class="company-hero">'+
+                f'<h2>{html.escape(company)}</h2>'+
+                f'<p><b>{html.escape(sector)}</b> · {html.escape(industry)}</p>'+
+                '</div>',unsafe_allow_html=True)
+
+    st.markdown('<div class="company-grid">'+
+                f'<div class="company-mini"><span>Promoter Holding</span><b>{pctv(promoter)}</b></div>'+
+                f'<div class="company-mini"><span>FII Holding</span><b>{pctv(fii)}</b></div>'+
+                f'<div class="company-mini"><span>DII Holding</span><b>{pctv(dii)}</b></div>'+
+                f'<div class="company-mini"><span>Public Holding</span><b>{pctv(public)}</b></div>'+
+                '</div>',unsafe_allow_html=True)
+
+    inst_txt="N/A" if inst is None else f"{float(inst)*100:.2f}%"
+    insider_txt="N/A" if insider is None else f"{float(insider)*100:.2f}%"
+    st.markdown('<div class="company-grid">'+
+                f'<div class="company-mini"><span>Institutional Holding</span><b>{inst_txt}</b></div>'+
+                f'<div class="company-mini"><span>Insider / Promoter Proxy</span><b>{insider_txt}</b></div>'+
+                f'<div class="company-mini"><span>Latest Shareholding Quarter</span><b>{html.escape(str(sh.get("quarter","N/A")))}</b></div>'+
+                f'<div class="company-mini"><span>Key Person</span><b>{html.escape(str(key_person))}</b></div>'+
+                '</div>',unsafe_allow_html=True)
+
+    st.markdown('<div class="company-section"><h3>💼 What business does it do?</h3>'+
+                f'<p style="color:#b9cde2;font-size:11px;line-height:1.7">{html.escape(business)}</p></div>',unsafe_allow_html=True)
+
+    if key_title:
+        st.caption(f"Key management: {key_person} — {key_title}. Exact promoter names may require the official shareholding filing.")
+
+    news=_company_latest_news(sym,company,3)
+    st.markdown('<div class="company-section"><h3>📰 Latest News — Short</h3>',unsafe_allow_html=True)
+    if news:
+        for n in news:
+            st.markdown('<div class="news-short">'+
+                        f'<b>{html.escape(n.get("title",""))}</b>'+
+                        f'<span>{html.escape(n.get("source",""))} · {html.escape(n.get("published",""))}</span>'+
+                        '</div>',unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="news-short"><span>No recent matching news found.</span></div>',unsafe_allow_html=True)
+    st.markdown('</div>',unsafe_allow_html=True)
+
+    if website: st.markdown(f"[Company website]({website})")
+    if sh.get("source_url"): st.caption("Shareholding source: Screener public company page (best-effort parsing).")
+
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"])
 
@@ -540,6 +678,8 @@ elif page=="🧠 Pro Analyzer":
             cs=st.columns(5)
             for col,v in zip(cs,[("ENTRY",latest),("STOP LOSS",stop),("TARGET 1",t1),("TARGET 2",t2),("R:R","1 : 3.0")]):
                 with col:st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{("₹"+format(v[1],",.2f")) if isinstance(v[1],float) else v[1]}</b></div>',unsafe_allow_html=True)
+
+            render_company_overview(sym,finfo)
 
 elif page=="🚀 Swing Screeners":
     st.markdown("## 🚀 Famous Swing-Trading Screener Library")
