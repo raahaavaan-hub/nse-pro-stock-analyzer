@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V12", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V13", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -690,6 +690,113 @@ def render_company_overview(sym,finfo):
     if sh.get("source_url"): st.caption("Shareholding source: Screener public company page (best-effort parsing).")
 
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def nse_all_indices():
+    """Official NSE index snapshot. Returns all indices exposed by NSE's public all-indices endpoint."""
+    try:
+        s=requests.Session()
+        s.headers.update({
+            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+            "Accept-Language":"en-US,en;q=0.9",
+            "Accept":"application/json,text/plain,*/*",
+            "Referer":"https://www.nseindia.com/market-data/live-market-indices"
+        })
+        s.get("https://www.nseindia.com",timeout=10)
+        r=s.get("https://www.nseindia.com/api/allIndices",timeout=12)
+        r.raise_for_status()
+        j=r.json()
+        rows=j.get("data",[]) if isinstance(j,dict) else []
+        out=[]
+        for x in rows:
+            name=str(x.get("index") or x.get("indexSymbol") or x.get("key") or "").strip()
+            if not name: continue
+            last=x.get("last")
+            pct=x.get("percentChange")
+            try:last=float(str(last).replace(",",""))
+            except:last=None
+            try:pct=float(str(pct).replace(",",""))
+            except:pct=None
+            out.append({"name":name,"last":last,"pct":pct})
+        return out
+    except Exception:
+        return []
+
+@st.cache_data(ttl=300, show_spinner=False)
+def nse_market_statistics():
+    """
+    Best-effort parse of NSE's official homepage Market Statistics.
+    Returns source='NSE' only when all four breadth figures are successfully parsed.
+    """
+    try:
+        s=requests.Session()
+        s.headers.update({
+            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+            "Accept-Language":"en-US,en;q=0.9",
+            "Referer":"https://www.nseindia.com/"
+        })
+        r=s.get("https://www.nseindia.com/?view=desktop",timeout=15)
+        r.raise_for_status()
+        txt=re.sub(r"\s+"," ",re.sub(r"<[^>]+>"," ",r.text))
+        labels={
+            "stock_traded":"Stock Traded",
+            "advances":"Advances",
+            "declines":"Declines",
+            "unchanged":"Unchanged",
+            "high52":"No. of Stocks at 52 Week High",
+            "low52":"No. of Stocks at 52 Week Low",
+            "upper":"No. of Stocks in Upper Circuit",
+            "lower":"No. of Stocks in Lower Circuit"
+        }
+        out={}
+        for key,label in labels.items():
+            m=re.search(re.escape(label)+r".{0,120}?([0-9][0-9,]*)",txt,re.I)
+            if m:
+                out[key]=int(m.group(1).replace(",",""))
+        tm=re.search(r"As on\s+([0-9]{1,2}-[A-Za-z]{3}-[0-9]{4}\s+[0-9]{1,2}:[0-9]{2}\s+IST)",txt,re.I)
+        if tm: out["as_on"]=tm.group(1)
+        out["source"]="NSE" if all(k in out for k in ["stock_traded","advances","declines","unchanged"]) else "Unavailable"
+        return out
+    except Exception:
+        return {"source":"Unavailable"}
+
+def _index_lookup(rows):
+    return {str(r.get("name","")).upper():r for r in rows}
+
+def _pick_nse_indices(rows, wanted_names):
+    lookup=_index_lookup(rows)
+    selected=[]
+    used=set()
+    for wanted in wanted_names:
+        w=wanted.upper()
+        exact=lookup.get(w)
+        if exact and exact["name"] not in used:
+            selected.append(exact);used.add(exact["name"]);continue
+        # tolerant matching for NSE naming differences
+        for name,row in lookup.items():
+            if w in name or name in w:
+                if row["name"] not in used:
+                    selected.append(row);used.add(row["name"]);break
+    return selected
+
+@st.cache_data(ttl=900, show_spinner=False)
+def brokerage_tags_for_symbols(symbols_tuple):
+    """Fast public-news brokerage tagger. Adds broker names only; does not fetch per-call prices."""
+    symbols=list(symbols_tuple)
+    brokers=["Jefferies","Motilal Oswal","ICICI Securities","HDFC Securities","Axis Securities","CLSA","Nomura","Morgan Stanley","Goldman Sachs","JM Financial"]
+    tags={s:[] for s in symbols}
+    for broker in brokers:
+        try:
+            news=google_news_rss(f'"{broker}" (buy OR target OR upgrade OR overweight) stock India',18)
+            for n in news:
+                txt=(n.get("title","") or "")+" "+(n.get("description","") or "")
+                sym=symbol_from_headline(txt,symbols)
+                if sym and broker not in tags[sym]:
+                    tags[sym].append(broker)
+        except Exception:
+            pass
+    return {k:", ".join(v) for k,v in tags.items() if v}
+
 # V8 safe navigation: resolve requested page before sidebar widgets are created.
 _pending_page=st.session_state.pop("pending_page",None)
 if _pending_page:
@@ -970,34 +1077,33 @@ elif page=="🌐 All NSE Performance":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE PERFORMANCE</div><h1>🌐 All NSE Performance</h1><p>Start with market statistics, then explore heat maps, then choose Classic Table or Smart Scanner.</p></div>",unsafe_allow_html=True)
 
     st.markdown("## 📊 Market Statistics")
-    syms_all=universe()
-    with st.spinner("Loading market breadth..."):
-        breadth_df=bulk_snapshot(tuple(syms_all[:1000]),"1y")
+    official_stats=nse_market_statistics()
 
-    total_traded=len(breadth_df) if isinstance(breadth_df,pd.DataFrame) else 0
-    advances=declines=unchanged=high52=low52=upper_circuit=lower_circuit=0
-    if isinstance(breadth_df,pd.DataFrame) and not breadth_df.empty:
-        if "1D %" in breadth_df.columns:
-            advances=int((breadth_df["1D %"]>0).sum())
-            declines=int((breadth_df["1D %"]<0).sum())
-            unchanged=int((breadth_df["1D %"]==0).sum())
-            upper_circuit=int((breadth_df["1D %"]>=19.8).sum())
-            lower_circuit=int((breadth_df["1D %"]<=-19.8).sum())
-        if "% of 52W High" in breadth_df.columns:
-            high52=int((breadth_df["% of 52W High"]>=99.5).sum())
-        if "52W Low" in breadth_df.columns and "Latest" in breadth_df.columns:
-            low52=int((breadth_df["Latest"]<=breadth_df["52W Low"]*1.005).sum())
+    if official_stats.get("source")=="NSE":
+        total_traded=official_stats.get("stock_traded",0)
+        advances=official_stats.get("advances",0)
+        declines=official_stats.get("declines",0)
+        unchanged=official_stats.get("unchanged",0)
+        high52=official_stats.get("high52",0)
+        low52=official_stats.get("low52",0)
+        upper_circuit=official_stats.get("upper",0)
+        lower_circuit=official_stats.get("lower",0)
+        as_on=official_stats.get("as_on","Latest NSE update")
+        st.caption(f"Official NSE Market Statistics · {as_on}")
+    else:
+        st.warning("Official NSE Market Statistics could not be fetched right now. I am not showing an estimated substitute, so the numbers will not mislead you.")
+        total_traded=advances=declines=unchanged=high52=low52=upper_circuit=lower_circuit=0
 
     s1,s2,s3,s4=st.columns(4)
-    s1.metric("Stock Traded",f"{total_traded:,}")
-    s2.metric("Advances",f"{advances:,}")
-    s3.metric("Declines",f"{declines:,}")
-    s4.metric("Unchanged",f"{unchanged:,}")
+    s1.metric("Stock Traded",f"{total_traded:,}" if total_traded else "—")
+    s2.metric("Advances",f"{advances:,}" if advances else "—")
+    s3.metric("Declines",f"{declines:,}" if declines else "—")
+    s4.metric("Unchanged",f"{unchanged:,}" if unchanged else "—")
     t1,t2,t3,t4=st.columns(4)
-    t1.metric("52 Week High",f"{high52:,}")
-    t2.metric("52 Week Low",f"{low52:,}")
-    t3.metric("Upper Circuit",f"{upper_circuit:,}")
-    t4.metric("Lower Circuit",f"{lower_circuit:,}")
+    t1.metric("52 Week High",f"{high52:,}" if high52 else "—")
+    t2.metric("52 Week Low",f"{low52:,}" if low52 else "—")
+    t3.metric("Upper Circuit",f"{upper_circuit:,}" if upper_circuit else "—")
+    t4.metric("Lower Circuit",f"{lower_circuit:,}" if lower_circuit else "—")
 
     st.markdown("## 🟩 Heat Map")
     heat_mode=st.radio("Choose heat map",["Broad Market Indices","Sectoral Indices"],horizontal=True,key="heat_mode")
@@ -1005,46 +1111,46 @@ elif page=="🌐 All NSE Performance":
     def heat_color(v):
         try:x=float(v)
         except:x=0
-        if x>=2:return "#0f7a3a"
-        if x>=0.5:return "#16a34a"
-        if x>0:return "#4ade80"
-        if x<=-2:return "#991b1b"
-        if x<=-0.5:return "#dc2626"
-        if x<0:return "#fb7185"
+        if x>=3:return "#08783e"
+        if x>=1:return "#109b52"
+        if x>0:return "#38b96b"
+        if x<=-3:return "#a80f16"
+        if x<=-1:return "#d01b2c"
+        if x<0:return "#ef7a86"
         return "#64748b"
 
-    broad_map={
-        "NIFTY 50":"^NSEI","NIFTY NEXT 50":"^NSMIDCP","NIFTY 100":"^CNX100",
-        "NIFTY 200":"^CNX200","NIFTY 500":"^CRSLDX","NIFTY MIDCAP":"NIFTY_MIDCAP_100.NS",
-        "NIFTY SMALLCAP":"NIFTY_SMLCAP_100.NS","NIFTY BANK":"^NSEBANK"
-    }
-    sector_map={
-        "NIFTY AUTO":"^CNXAUTO","NIFTY BANK":"^NSEBANK","NIFTY FMCG":"^CNXFMCG","NIFTY IT":"^CNXIT",
-        "NIFTY METAL":"^CNXMETAL","NIFTY PHARMA":"^CNXPHARMA","NIFTY PSU BANK":"^CNXPSUBANK",
-        "NIFTY REALTY":"^CNXREALTY","NIFTY ENERGY":"^CNXENERGY","NIFTY MEDIA":"^CNXMEDIA"
-    }
+    all_idx=nse_all_indices()
+    broad_names=[
+        "NIFTY 50","NIFTY NEXT 50","NIFTY MIDCAP 50","NIFTY MIDCAP 100","NIFTY MIDCAP 150",
+        "NIFTY SMLCAP 50","NIFTY SMLCAP 100","NIFTY SMLCAP 250","NIFTY MIDSMALLCAP 400",
+        "NIFTY 100","NIFTY 200","NIFTY 500","NIFTY LARGEMIDCAP 250","NIFTY MID SELECT",
+        "NIFTY TOTAL MARKET","NIFTY MICROCAP 250","NIFTY500 MULTICAP 50:25:25","NIFTY FPI 150",
+        "NIFTY500 LARGE MID SMALL EQUAL-CAP WEIGHTED","NIFTY MIDSMALLCAP 400"
+    ]
+    sector_names=[
+        "NIFTY AUTO","NIFTY BANK","NIFTY FINANCIAL SERVICES","NIFTY FINANCIAL SERVICES 25/50",
+        "NIFTY FMCG","NIFTY IT","NIFTY MEDIA","NIFTY METAL","NIFTY PHARMA","NIFTY PSU BANK",
+        "NIFTY PRIVATE BANK","NIFTY REALTY","NIFTY HEALTHCARE INDEX","NIFTY CONSUMER DURABLES",
+        "NIFTY OIL & GAS","NIFTY MIDSMALL HEALTHCARE","NIFTY CHEMICALS","NIFTY500 HEALTHCARE",
+        "NIFTY FINANCIAL SERVICES EX-BANK","NIFTY MIDSMALL FINANCIAL SERVICES",
+        "NIFTY MIDSMALL IT & TELECOM","NIFTY CEMENT","NIFTY REITS & INVITS"
+    ]
+    tile_rows=_pick_nse_indices(all_idx,broad_names if heat_mode=="Broad Market Indices" else sector_names)
 
-    @st.cache_data(ttl=300,show_spinner=False)
-    def fetch_index_tiles(items):
-        rows=[]
-        for name,ticker in items.items():
-            try:
-                d=yf.download(ticker,period="5d",interval="1d",auto_adjust=False,progress=False,threads=False)
-                if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
-                c=d["Close"].dropna()
-                if len(c)>=2:
-                    latest=float(c.iloc[-1]);chg=(latest/c.iloc[-2]-1)*100
-                    rows.append((name,latest,chg))
-            except Exception:
-                pass
-        return rows
-
-    tile_rows=fetch_index_tiles(broad_map if heat_mode=="Broad Market Indices" else sector_map)
-    heat_cols=st.columns(4)
-    for i,(name,val,chg) in enumerate(tile_rows):
-        with heat_cols[i%4]:
-            tile_html=f"<div style='padding:16px;border-radius:12px;background:{heat_color(chg)};color:white;margin-bottom:10px'><div style='font-size:12px;font-weight:900'>{name}</div><div style='font-size:20px;font-weight:900;margin-top:8px'>{val:,.2f}</div><div style='font-size:14px;font-weight:900'>{chg:+.2f}%</div></div>"
-            st.markdown(tile_html,unsafe_allow_html=True)
+    if not tile_rows:
+        st.warning("NSE index feed is temporarily unavailable.")
+    else:
+        st.caption(f"Official NSE index feed · {len(tile_rows)} {heat_mode.lower()} shown")
+        heat_cols=st.columns(4)
+        for i,row in enumerate(tile_rows):
+            name=row.get("name","")
+            val=row.get("last")
+            chg=row.get("pct")
+            val_txt="—" if val is None else f"{val:,.2f}"
+            chg_txt="—" if chg is None else f"{chg:+.2f}%"
+            with heat_cols[i%4]:
+                tile_html=f"<div style='padding:16px;border-radius:12px;background:{heat_color(chg)};color:white;margin-bottom:10px;min-height:104px'><div style='font-size:12px;font-weight:900'>{html.escape(name)}</div><div style='font-size:20px;font-weight:900;margin-top:8px'>{val_txt}</div><div style='font-size:14px;font-weight:900'>{chg_txt}</div></div>"
+                st.markdown(tile_html,unsafe_allow_html=True)
 
     st.markdown("## 📋 Stock Performance")
     view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner"],horizontal=True,key="allnse_view")
@@ -1085,9 +1191,26 @@ elif page=="🌐 All NSE Performance":
                 d[sort_by]=pd.to_numeric(d[sort_by],errors="coerce")
                 d=d.sort_values(sort_by,ascending=(order=="Smallest → Largest"),na_position="last")
 
-            cols_show=["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20"]
+            show_brokerage=st.checkbox("🔵 Highlight stocks with public brokerage calls",value=True,key="classic_brokerage")
+            if show_brokerage:
+                with st.spinner("Checking recent brokerage-call headlines..."):
+                    broker_map=brokerage_tags_for_symbols(tuple(d["Symbol"].astype(str).tolist()))
+                d["Brokerage Call"]=d["Symbol"].astype(str).map(broker_map).fillna("")
+            else:
+                d["Brokerage Call"]=""
+
+            cols_show=["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20","Brokerage Call"]
             cols_show=[c for c in cols_show if c in d.columns]
-            st.dataframe(clean_display(d[cols_show]),use_container_width=True,height=700,hide_index=True)
+            classic_display=clean_display(d[cols_show])
+            if "Brokerage Call" in classic_display.columns:
+                def _broker_row_style(row):
+                    has_call=bool(str(row.get("Brokerage Call","")).strip())
+                    return ["background-color:#dbeafe;color:#0f172a;font-weight:700" if has_call else "" for _ in row]
+                styled=classic_display.style.apply(_broker_row_style,axis=1)
+                st.dataframe(styled,use_container_width=True,height=700,hide_index=True)
+                st.caption("🔵 Blue row = recent public brokerage-call headline detected. The final column shows the brokerage name(s).")
+            else:
+                st.dataframe(classic_display,use_container_width=True,height=700,hide_index=True)
 
             st.markdown("### 🧠 Inspect a Candidate")
             a1,a2=st.columns([3,1])
