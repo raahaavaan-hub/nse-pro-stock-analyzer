@@ -1,6 +1,8 @@
 
-import io, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
+import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
 import plotly.graph_objects as go
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus
 
 st.set_page_config(page_title="NSE Pro Market Terminal", page_icon="📈", layout="wide")
 
@@ -15,6 +17,16 @@ st.markdown("""
 .signal{padding:18px;border-radius:15px;background:#0b1523;border:1px solid #1e293b;min-height:260px}.badge{display:inline-block;padding:9px 14px;border-radius:8px;font-weight:900;background:#16a34a;margin:8px 0}.factor{padding:8px 10px;background:#0d1726;border-left:3px solid #334155;border-radius:7px;margin:7px 0;font-size:11px}
 .card{padding:16px;border-radius:14px;background:#0b1523;border:1px solid #1e293b}
 </style>
+
+<style>
+.news-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:12px}
+.news-card{padding:15px;border-radius:14px;background:#0b1523;border:1px solid #1e293b}
+.news-card h4{margin:6px 0 8px;font-size:15px}.news-card p{font-size:10px;color:#9fb0c4;line-height:1.5}
+.news-card a{font-size:10px;color:#60a5fa;text-decoration:none}.news-meta{font-size:9px;color:#64748b;margin-bottom:5px}
+.news-tag{display:inline-block;padding:4px 7px;border-radius:999px;background:#172554;color:#bfdbfe;font-size:8px;font-weight:900}
+@media(max-width:900px){.news-grid{grid-template-columns:1fr}}
+</style>
+
 
 <style>
 .top-picks-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0}
@@ -133,8 +145,103 @@ def run_screen(df,name):
     elif name=="Oversold Rebound Watch":x=x[(x.RSI14<=40)&(x.Latest>x.SMA200)]
     return x
 
+
+@st.cache_data(ttl=600, show_spinner=False)
+def google_news_rss(query, limit=25):
+    url="https://news.google.com/rss/search?q="+quote_plus(query)+"&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        r=requests.get(url,headers=HEADERS,timeout=12)
+        r.raise_for_status()
+        root=ET.fromstring(r.content)
+        rows=[]
+        for item in root.findall(".//item")[:limit]:
+            title=html.unescape(item.findtext("title") or "")
+            link=item.findtext("link") or ""
+            pub=item.findtext("pubDate") or ""
+            src=item.find("source")
+            source=src.text if src is not None and src.text else ""
+            desc=html.unescape(item.findtext("description") or "")
+            desc=re.sub("<[^>]+>"," ",desc)
+            desc=re.sub(r"\s+"," ",desc).strip()
+            rows.append({"title":title,"link":link,"published":pub,"source":source,"description":desc})
+        return rows
+    except Exception:
+        return []
+
+def classify_news(title):
+    t=title.lower()
+    if "buyback" in t or "buy back" in t: return "Buyback"
+    if any(k in t for k in ["q1","q2","q3","q4","quarter","results","profit","revenue","earnings"]): return "Results"
+    if any(k in t for k in ["order","contract","wins","deal"]): return "Order/Deal"
+    if any(k in t for k in ["falls","drops","slumps","weak","loss","decline"]): return "Negative Move"
+    if any(k in t for k in ["rises","jumps","surges","gains","record high"]): return "Positive Move"
+    if any(k in t for k in ["dividend","bonus","split"]): return "Corporate Action"
+    return "Market News"
+
+def target_from_text(text):
+    pats=[
+        r"(?:target(?: price)?|price target|pt)\s*(?:of|at|to|:|-)?\s*(?:rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"(?:rs\.?|₹)\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:target|price target)"
+    ]
+    for p in pats:
+        m=re.search(p,text,re.I)
+        if m:
+            try:return float(m.group(1).replace(",",""))
+            except:return None
+    return None
+
+def symbol_from_headline(text, symbols):
+    up=" "+re.sub(r"[^A-Z0-9&-]"," ",text.upper())+" "
+    for s in symbols:
+        if f" {s} " in up:
+            return s
+    aliases={
+        "RELIANCE INDUSTRIES":"RELIANCE","TATA CONSULTANCY SERVICES":"TCS",
+        "HDFC BANK":"HDFCBANK","ICICI BANK":"ICICIBANK","STATE BANK OF INDIA":"SBIN",
+        "BHARTI AIRTEL":"BHARTIARTL","LARSEN TOUBRO":"LT","LARSEN & TOUBRO":"LT"
+    }
+    for name,s in aliases.items():
+        if name in text.upper(): return s
+    return None
+
+@st.cache_data(ttl=900, show_spinner=False)
+def current_and_call_price(symbol, call_date_text):
+    try:
+        d=yf.download(symbol+".NS",period="1y",interval="1d",auto_adjust=False,progress=False,threads=False)
+        if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
+        if d.empty:return None,None
+        cur=float(d["Close"].dropna().iloc[-1])
+        call=None
+        try:
+            dt=pd.to_datetime(call_date_text,utc=True).tz_convert(None)
+            hist=d[d.index>=dt]
+            if not hist.empty: call=float(hist["Close"].dropna().iloc[0])
+        except: pass
+        return cur,call
+    except:
+        return None,None
+
+def broker_calls_from_news(broker, symbols, limit=20):
+    q=f'"{broker}" (buy OR target OR overweight OR upgrade) stock India'
+    news=google_news_rss(q,limit)
+    rows=[]
+    for n in news:
+        txt=n["title"]+" "+n["description"]
+        sym=symbol_from_headline(txt,symbols)
+        tgt=target_from_text(txt)
+        if not sym and not tgt: continue
+        cur,call=(None,None)
+        if sym: cur,call=current_and_call_price(sym,n["published"])
+        status="Open"
+        if cur and tgt: status="Target Hit" if cur>=tgt else "Below Target"
+        ret=((cur/call)-1)*100 if cur and call else None
+        rows.append({"Broker":broker,"Symbol":sym or "—","Headline":n["title"],"Published":n["published"],
+                     "Target":tgt,"Call Price":call,"Current":cur,"Return Since Call %":ret,
+                     "Status":status,"Source":n["source"],"Link":n["link"]})
+    return rows
+
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"])
+page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"])
 
 if page=="🏠 Dashboard":
     st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>One terminal. Less manual work.</h1><p>Analyze stocks, scan swing setups and stop typing closing prices by hand.</p></div>',unsafe_allow_html=True)
@@ -246,6 +353,80 @@ elif page=="🚀 Swing Screeners":
         syms=universe();syms=syms if size=="All" else syms[:int(size)]
         with st.spinner("Downloading market history in batches..."):snap=bulk_snapshot(tuple(syms),"1y");res=run_screen(snap,name)
         res=clean_display(res);st.dataframe(res,use_container_width=True,height=600,hide_index=True);st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
+
+
+elif page=="📰 Stock News":
+    st.markdown("## 📰 Stock News & Event Radar")
+    st.caption("Search stock-specific news for results, buybacks, corporate actions, price moves and company events.")
+    c1,c2,c3=st.columns([1.2,1,1])
+    with c1: q=st.text_input("Stock / company / topic",value="TBZ")
+    with c2: mode=st.selectbox("News type",["All","Results","Buyback","Corporate Action","Positive Move","Negative Move"])
+    with c3: count=st.selectbox("Articles",[10,20,30],index=1)
+
+    if st.button("⚡ Load Latest News",type="primary"):
+        with st.spinner("Fetching latest news..."):
+            rows=google_news_rss(q+" stock India NSE",count)
+        outrows=[]
+        for n in rows:
+            n=n.copy(); n["type"]=classify_news(n["title"])
+            if mode=="All" or n["type"]==mode: outrows.append(n)
+        st.session_state["news_rows"]=outrows
+
+    rows=st.session_state.get("news_rows",[])
+    if rows:
+        st.markdown(f"### Latest matching stories ({len(rows)})")
+        for n in rows:
+            card = (
+                '<div class="news-card">'
+                + '<span class="news-tag">'+html.escape(n["type"])+'</span>'
+                + '<div class="news-meta">'+html.escape(n["source"])+' | '+html.escape(n["published"])+'</div>'
+                + '<h4>'+html.escape(n["title"])+'</h4>'
+                + '<p>'+html.escape(n["description"][:260])+'</p>'
+                + '<a href="'+n["link"]+'" target="_blank">Open article ↗</a>'
+                + '</div>'
+            )
+            st.markdown(card,unsafe_allow_html=True)
+
+    st.markdown("### Quick event searches")
+    qcols=st.columns(4)
+    quick=[("TBZ / GRT Buyback","TBZ GRT buyback stock India"),
+           ("Quarterly Results","Q1 results India stocks profit revenue"),
+           ("PVR INOX","PVR INOX shares fall reason"),
+           ("Milky Mist","Milky Mist Q1 results")]
+    for col,(label,qq) in zip(qcols,quick):
+        with col:
+            if st.button(label,use_container_width=True,key="news_"+label):
+                with st.spinner("Fetching..."):
+                    st.session_state["news_rows"]=[dict(x,type=classify_news(x["title"])) for x in google_news_rss(qq,20)]
+                st.rerun()
+
+elif page=="🎯 Brokerage Calls":
+    st.markdown("## 🎯 Brokerage Calls & Target Tracker")
+    st.caption("Tracks public brokerage-call headlines, target prices when detectable, current price and return since the call date.")
+    brokers=["Jefferies","Motilal Oswal","ICICI Securities","HDFC Securities","Axis Securities","Morgan Stanley","Goldman Sachs","CLSA","Nomura","JM Financial"]
+    chosen=st.multiselect("Brokerages",brokers,default=["Jefferies","Motilal Oswal"])
+    limit=st.selectbox("Headlines per brokerage",[10,20,30],index=1)
+    if st.button("⚡ Refresh Brokerage Calls",type="primary"):
+        syms=universe()
+        allrows=[]
+        with st.spinner("Searching brokerage calls and comparing market prices..."):
+            for b in chosen:
+                allrows.extend(broker_calls_from_news(b,syms,limit))
+        st.session_state["broker_rows"]=allrows
+
+    rows=st.session_state.get("broker_rows",[])
+    if rows:
+        df=pd.DataFrame(rows)
+        for c in ["Target","Call Price","Current","Return Since Call %"]:
+            if c in df.columns: df[c]=pd.to_numeric(df[c],errors="coerce").round(2)
+        k1,k2,k3=st.columns(3)
+        with k1: st.metric("Calls found",len(df))
+        with k2: st.metric("Targets hit",int((df["Status"]=="Target Hit").sum()))
+        with k3: st.metric("Below target",int((df["Status"]=="Below Target").sum()))
+        show=["Broker","Symbol","Published","Target","Call Price","Current","Return Since Call %","Status","Source","Headline"]
+        st.dataframe(df[show],use_container_width=True,height=620,hide_index=True)
+        st.download_button("⬇️ Download Brokerage Calls CSV",df.to_csv(index=False).encode(),"brokerage_calls.csv","text/csv")
+        st.info("Target and symbol are parsed only when clearly present in public news text. Blank means not confidently detected.")
 
 elif page=="🌐 All NSE Performance":
     st.markdown("## 🌐 All NSE Performance & Closing-Price Hub");syms=universe();st.success(f"Universe loaded: {len(syms):,} symbols")
