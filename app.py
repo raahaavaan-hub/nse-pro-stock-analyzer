@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V13", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V14", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -834,8 +834,57 @@ div[data-testid="stMetricValue"] {color:#f8fafc !important;}
 </style>
 """,unsafe_allow_html=True)
 
+
+st.markdown("""
+<style>
+/* V14 compact heat map */
+.nse-heat-grid{
+  display:grid;
+  grid-template-columns:repeat(6,minmax(0,1fr));
+  gap:8px;
+  margin:8px 0 18px;
+}
+.nse-heat-card{
+  min-height:72px;
+  padding:9px 10px;
+  border-radius:9px;
+  color:#fff;
+  box-shadow:0 3px 10px rgba(2,8,23,.12);
+}
+.nse-heat-name{
+  font-size:9px;
+  line-height:1.15;
+  font-weight:900;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.nse-heat-value{
+  font-size:14px;
+  line-height:1.2;
+  font-weight:900;
+  margin-top:8px;
+}
+.nse-heat-change{
+  font-size:11px;
+  font-weight:900;
+  margin-top:3px;
+}
+@media(max-width:1100px){.nse-heat-grid{grid-template-columns:repeat(4,minmax(0,1fr));}}
+@media(max-width:700px){.nse-heat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+</style>
+""",unsafe_allow_html=True)
+
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+
+st.sidebar.markdown("---")
+st.sidebar.link_button(
+    "🛠️ Open app.py on GitHub",
+    "https://github.com/raahaavaan-hub/nse-pro-stock-analyzer/blob/main/app.py",
+    use_container_width=True
+)
+st.sidebar.caption("Open the live app.py file directly when you want to update the website.")
 
 if page=="🏠 Dashboard":
     st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
@@ -1141,16 +1190,21 @@ elif page=="🌐 All NSE Performance":
         st.warning("NSE index feed is temporarily unavailable.")
     else:
         st.caption(f"Official NSE index feed · {len(tile_rows)} {heat_mode.lower()} shown")
-        heat_cols=st.columns(4)
-        for i,row in enumerate(tile_rows):
+        cards=[]
+        for row in tile_rows:
             name=row.get("name","")
             val=row.get("last")
             chg=row.get("pct")
             val_txt="—" if val is None else f"{val:,.2f}"
             chg_txt="—" if chg is None else f"{chg:+.2f}%"
-            with heat_cols[i%4]:
-                tile_html=f"<div style='padding:16px;border-radius:12px;background:{heat_color(chg)};color:white;margin-bottom:10px;min-height:104px'><div style='font-size:12px;font-weight:900'>{html.escape(name)}</div><div style='font-size:20px;font-weight:900;margin-top:8px'>{val_txt}</div><div style='font-size:14px;font-weight:900'>{chg_txt}</div></div>"
-                st.markdown(tile_html,unsafe_allow_html=True)
+            cards.append(
+                f"<div class='nse-heat-card' style='background:{heat_color(chg)}'>"
+                f"<div class='nse-heat-name'>{html.escape(name)}</div>"
+                f"<div class='nse-heat-value'>{val_txt}</div>"
+                f"<div class='nse-heat-change'>{chg_txt}</div>"
+                f"</div>"
+            )
+        st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
     st.markdown("## 📋 Stock Performance")
     view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner"],horizontal=True,key="allnse_view")
@@ -1174,8 +1228,8 @@ elif page=="🌐 All NSE Performance":
         st.markdown("### 📋 Classic Performance Table")
         c1,c2,c3=st.columns(3)
         history=c1.selectbox("History",["1y","2y","5y"],index=2,key="classic_history")
-        sort_by=c2.selectbox("Sort by",["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20"],index=2,key="classic_sort")
-        order_options=["A → Z","Z → A"] if sort_by=="Symbol" else ["Largest → Smallest","Smallest → Largest"]
+        sort_by=c2.selectbox("Sort by",["Symbol","Brokerage Call","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20"],index=2,key="classic_sort")
+        order_options=["A → Z","Z → A"] if sort_by in ["Symbol","Brokerage Call"] else ["Largest → Smallest","Smallest → Largest"]
         order=c3.selectbox("Order",order_options,key="classic_order")
 
         if st.button("📊 Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
@@ -1187,11 +1241,11 @@ elif page=="🌐 All NSE Performance":
             d=classic.copy()
             if sort_by=="Symbol":
                 d=d.sort_values("Symbol",ascending=(order=="A → Z"),na_position="last")
-            elif sort_by in d.columns:
+            elif sort_by!="Brokerage Call" and sort_by in d.columns:
                 d[sort_by]=pd.to_numeric(d[sort_by],errors="coerce")
                 d=d.sort_values(sort_by,ascending=(order=="Smallest → Largest"),na_position="last")
 
-            show_brokerage=st.checkbox("🔵 Highlight stocks with public brokerage calls",value=True,key="classic_brokerage")
+            show_brokerage=st.checkbox("🔵 Check recent public brokerage calls",value=True,key="classic_brokerage")
             if show_brokerage:
                 with st.spinner("Checking recent brokerage-call headlines..."):
                     broker_map=brokerage_tags_for_symbols(tuple(d["Symbol"].astype(str).tolist()))
@@ -1199,7 +1253,30 @@ elif page=="🌐 All NSE Performance":
             else:
                 d["Brokerage Call"]=""
 
-            cols_show=["Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20","Brokerage Call"]
+            broker_choices=[
+                "All Stocks","Only Stocks With Brokerage Calls","No Brokerage Call",
+                "Jefferies","Motilal Oswal","ICICI Securities","HDFC Securities",
+                "Axis Securities","CLSA","Nomura","Morgan Stanley","Goldman Sachs","JM Financial"
+            ]
+            broker_filter=st.selectbox("Brokerage filter",broker_choices,key="classic_broker_filter")
+            if broker_filter=="Only Stocks With Brokerage Calls":
+                d=d[d["Brokerage Call"].astype(str).str.strip()!=""]
+            elif broker_filter=="No Brokerage Call":
+                d=d[d["Brokerage Call"].astype(str).str.strip()==""]
+            elif broker_filter!="All Stocks":
+                d=d[d["Brokerage Call"].astype(str).str.contains(broker_filter,case=False,na=False)]
+
+            # Re-apply selected sort after brokerage tagging/filtering.
+            if sort_by in ["Symbol","Brokerage Call"]:
+                d=d.sort_values(sort_by,ascending=(order=="A → Z"),na_position="last")
+            elif sort_by in d.columns:
+                d[sort_by]=pd.to_numeric(d[sort_by],errors="coerce")
+                d=d.sort_values(sort_by,ascending=(order=="Smallest → Largest"),na_position="last")
+
+            d=d.reset_index(drop=True)
+            d.insert(0,"S.No",range(1,len(d)+1))
+
+            cols_show=["S.No","Symbol","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20","Brokerage Call"]
             cols_show=[c for c in cols_show if c in d.columns]
             classic_display=clean_display(d[cols_show])
             if "Brokerage Call" in classic_display.columns:
@@ -1258,6 +1335,8 @@ elif page=="🌐 All NSE Performance":
                     elif trend_filter=="Price > SMA20 > SMA50":d=d[d["Latest"].gt(d["SMA20"]) & d["SMA20"].gt(d["SMA50"])]
 
                 d=d.sort_values(rank_by,ascending=(direction=="Lowest first"),na_position="last")
+                d=d.reset_index(drop=True)
+                d.insert(0,"S.No",range(1,len(d)+1))
                 st.dataframe(clean_display(d),use_container_width=True,height=620,hide_index=True)
 
                 st.markdown("### 🧠 Inspect a Candidate")
