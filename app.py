@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V9", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V10", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -604,6 +604,28 @@ if _qp_page=="pro" and _qp_stock:
     st.session_state["auto_analyze"]=True
     st.query_params.clear()
 
+
+st.markdown("""
+<style>
+/* V10 readability */
+div[data-testid="stButton"] > button {
+ background:#18304d !important;color:#ffffff !important;
+ border:1px solid #4da3ff !important;font-weight:800 !important;
+}
+div[data-testid="stButton"] > button:hover {
+ background:#2563eb !important;color:#fff !important;border-color:#93c5fd !important;
+}
+div[data-testid="stButton"] > button p {color:#ffffff !important;font-weight:800 !important;}
+div[data-baseweb="select"] > div {background:#f8fafc !important;color:#0f172a !important;}
+div[data-baseweb="select"] * {color:#0f172a !important;}
+div[data-testid="stNumberInput"] input {background:#f8fafc !important;color:#0f172a !important;font-weight:700 !important;}
+div[data-testid="stNumberInput"] button {color:#0f172a !important;}
+label[data-testid="stWidgetLabel"] p {color:#cbd5e1 !important;font-weight:700 !important;}
+div[data-testid="stMetric"] label p {color:#9fb3c8 !important;}
+div[data-testid="stMetricValue"] {color:#f8fafc !important;}
+</style>
+""",unsafe_allow_html=True)
+
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
@@ -881,7 +903,8 @@ elif page=="🌐 All NSE Performance":
 
     if st.session_state.get("allnse_quick") or build:
         with st.spinner("Scanning NSE stocks..."):
-            df=all_table(int(stock_n),history)
+            symbols=universe()[:int(stock_n)]
+            df=bulk_snapshot(tuple(symbols),history)
 
         if df is None or df.empty:
             st.warning("No market data returned. Try again.")
