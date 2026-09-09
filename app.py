@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V7", page_icon="📈", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V8", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -50,6 +50,9 @@ st.markdown("""
 <style>
 .top-picks-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0}
 .pick-card{padding:16px;border-radius:15px;background:linear-gradient(145deg,#0b1523,#101c2c);border:1px solid #1e293b;min-height:150px}
+.pick-card-link{display:block!important;text-decoration:none!important;color:inherit!important;cursor:pointer!important;transition:.16s ease}
+.pick-card-link:hover{transform:translateY(-2px);border-color:#38bdf8!important;box-shadow:0 12px 26px rgba(56,189,248,.16)!important}
+
 .pick-card b,.pick-card span,.pick-card small{display:block}.pick-card b{font-size:19px;margin:7px 0}.pick-card span{color:#94a3b8;font-size:10px}.pick-card small{font-size:10px;margin-top:7px}
 .pick-badge{display:inline-block!important;width:max-content;padding:5px 8px;border-radius:999px;background:#14532d;color:#86efac!important;font-weight:900}
 .risk-box{padding:10px 12px;border-radius:10px;background:#2a1606;border:1px solid #78350f;color:#fbbf24;font-size:11px;margin:10px 0}
@@ -585,6 +588,22 @@ def render_company_overview(sym,finfo):
     if website: st.markdown(f"[Company website]({website})")
     if sh.get("source_url"): st.caption("Shareholding source: Screener public company page (best-effort parsing).")
 
+
+# V8 safe navigation: resolve requested page before sidebar widgets are created.
+_pending_page=st.session_state.pop("pending_page",None)
+if _pending_page:
+    st.session_state["main_page"]=_pending_page
+
+_qp_page=st.query_params.get("page","")
+_qp_stock=st.query_params.get("stock","")
+if _qp_page=="pro" and _qp_stock:
+    _stock=str(_qp_stock).upper().strip()
+    st.session_state["main_page"]="🧠 Pro Analyzer"
+    st.session_state["analyzer_symbol"]=_stock
+    st.session_state["analyzer_period"]="1y"
+    st.session_state["auto_analyze"]=True
+    st.query_params.clear()
+
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
@@ -722,15 +741,16 @@ elif page=="🚀 Swing Screeners":
             with cols[i%3]:
                 risk="High overbought risk" if r["RSI14"]>80 else "Overbought watch" if r["RSI14"]>70 else "Normal"
                 st.markdown(
-                    f'<div class="pick-card"><span class="pick-badge">Score {int(r["Score"])}</span><b>{r["Symbol"]}</b><span>₹{r["Latest"]:.2f}</span><small>1W {r["1W %"]:+.2f}% · 1M {r["1M %"]:+.2f}% · RSI {r["RSI14"]:.1f}</small><small>{risk}</small></div>',
+                    f'<a class="pick-card pick-card-link" href="?page=pro&stock={r["Symbol"]}" target="_self">'
+                    f'<span class="pick-badge">Score {int(r["Score"])}</span>'
+                    f'<b>{r["Symbol"]}</b>'
+                    f'<span>₹{r["Latest"]:.2f}</span>'
+                    f'<small>1W {r["1W %"]:+.2f}% · 1M {r["1M %"]:+.2f}% · RSI {r["RSI14"]:.1f}</small>'
+                    f'<small>{risk}</small>'
+                    f'<small style="margin-top:10px;color:#67e8f9;font-weight:900">Click card → Full Pro Analysis</small>'
+                    f'</a>',
                     unsafe_allow_html=True
                 )
-                if st.button(f'🔎 Open {r["Symbol"]} in Pro Analyzer',key=f'open_pick_{r["Symbol"]}',use_container_width=True):
-                    st.session_state["analyzer_symbol"]=r["Symbol"]
-                    st.session_state["analyzer_period"]="1y"
-                    st.session_state["auto_analyze"]=True
-                    st.session_state["main_page"]="🧠 Pro Analyzer"
-                    st.rerun()
 
     name=st.selectbox("Preset",list(SCREENERS));st.info(SCREENERS[name]);size=st.selectbox("Universe size",[100,250,500,1000,"All"],index=1)
     if st.button("🔥 Run Screener",type="primary"):
@@ -744,7 +764,7 @@ elif page=="🚀 Swing Screeners":
                 st.session_state["analyzer_symbol"]=chosen_symbol
                 st.session_state["analyzer_period"]="1y"
                 st.session_state["auto_analyze"]=True
-                st.session_state["main_page"]="🧠 Pro Analyzer"
+                st.session_state["pending_page"]="🧠 Pro Analyzer"
                 st.rerun()
         st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
 
