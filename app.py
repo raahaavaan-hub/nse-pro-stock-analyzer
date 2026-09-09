@@ -15,6 +15,18 @@ st.markdown("""
 .signal{padding:18px;border-radius:15px;background:#0b1523;border:1px solid #1e293b;min-height:260px}.badge{display:inline-block;padding:9px 14px;border-radius:8px;font-weight:900;background:#16a34a;margin:8px 0}.factor{padding:8px 10px;background:#0d1726;border-left:3px solid #334155;border-radius:7px;margin:7px 0;font-size:11px}
 .card{padding:16px;border-radius:14px;background:#0b1523;border:1px solid #1e293b}
 </style>
+
+<style>
+.top-picks-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0}
+.pick-card{padding:16px;border-radius:15px;background:linear-gradient(145deg,#0b1523,#101c2c);border:1px solid #1e293b;min-height:150px}
+.pick-card b,.pick-card span,.pick-card small{display:block}.pick-card b{font-size:19px;margin:7px 0}.pick-card span{color:#94a3b8;font-size:10px}.pick-card small{font-size:10px;margin-top:7px}
+.pick-badge{display:inline-block!important;width:max-content;padding:5px 8px;border-radius:999px;background:#14532d;color:#86efac!important;font-weight:900}
+.risk-box{padding:10px 12px;border-radius:10px;background:#2a1606;border:1px solid #78350f;color:#fbbf24;font-size:11px;margin:10px 0}
+.clean-table-note{font-size:10px;color:#94a3b8;margin:6px 0 10px}
+.signal-strong{color:#4ade80}.signal-watch{color:#fbbf24}.signal-avoid{color:#fb7185}
+@media(max-width:900px){.top-picks-grid{grid-template-columns:1fr}}
+</style>
+
 """, unsafe_allow_html=True)
 
 NSE_URL="https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
@@ -95,6 +107,20 @@ SCREENERS={
 "Oversold Rebound Watch":"RSI ≤40 + price above SMA200"
 }
 
+
+def clean_display(df):
+    if df is None or df.empty:
+        return df
+    x=df.copy()
+    pct_cols=[c for c in x.columns if c.endswith("%") or c in ["RSI14","Volume Ratio","% of 52W High"]]
+    for c in pct_cols:
+        if c in x.columns:
+            x[c]=pd.to_numeric(x[c],errors="coerce").round(2)
+    for c in ["Latest","SMA20","SMA50","SMA200","52W High","52W Low"]:
+        if c in x.columns:
+            x[c]=pd.to_numeric(x[c],errors="coerce").round(2)
+    return x
+
 def run_screen(df,name):
     x=df.copy()
     if name=="52W Breakout Leaders":x=x[(x["% of 52W High"]>=95)&(x.Latest>x.SMA50)]
@@ -124,12 +150,35 @@ elif page=="🧠 Pro Analyzer":
         if d.empty:st.error("No data returned. Try again.")
         else:
             x=ind(d);latest=float(x.Close.iloc[-1]);prev=float(x.Close.iloc[-2]);rsi=float(x.RSI14.iloc[-1]);year=x.tail(252);hi=float(year.High.max());lo=float(year.Low.min())
-            score=0;factors=[]
-            if pd.notna(x.SMA50.iloc[-1]) and latest>x.SMA50.iloc[-1]:score+=2;factors.append("✅ Price above SMA50")
-            if pd.notna(x.SMA200.iloc[-1]) and x.SMA50.iloc[-1]>x.SMA200.iloc[-1]:score+=2;factors.append("✅ SMA50 above SMA200")
-            if latest>x.EMA9.iloc[-1]:score+=1;factors.append("✅ Price above EMA9")
-            if x.MACD.iloc[-1]>x.MACDS.iloc[-1]:score+=1;factors.append("✅ MACD bullish")
-            label="STRONG BUY" if score>=5 else "BUY" if score>=3 else "WATCH"
+            score=0;factors=[];warnings=[]
+            if pd.notna(x.SMA50.iloc[-1]) and latest>x.SMA50.iloc[-1]:
+                score+=2;factors.append("✅ Price above SMA50")
+            else:
+                score-=1;warnings.append("⚠️ Price is below SMA50")
+            if pd.notna(x.SMA200.iloc[-1]) and pd.notna(x.SMA50.iloc[-1]) and x.SMA50.iloc[-1]>x.SMA200.iloc[-1]:
+                score+=2;factors.append("✅ SMA50 above SMA200")
+            elif pd.notna(x.SMA200.iloc[-1]):
+                score-=1;warnings.append("⚠️ SMA50 is not above SMA200")
+            if latest>x.EMA9.iloc[-1]:
+                score+=1;factors.append("✅ Price above EMA9")
+            else:
+                score-=1;warnings.append("⚠️ Price below EMA9")
+            if x.MACD.iloc[-1]>x.MACDS.iloc[-1]:
+                score+=1;factors.append("✅ MACD bullish")
+            else:
+                score-=1;warnings.append("⚠️ MACD not confirmed")
+            if np.isfinite(rsi):
+                if 55<=rsi<=70:
+                    score+=1;factors.append(f"✅ RSI {rsi:.1f} supports momentum")
+                elif rsi>80:
+                    score-=2;warnings.append(f"⚠️ RSI {rsi:.1f} is extremely overbought — chase risk is high")
+                elif rsi>70:
+                    score-=1;warnings.append(f"⚠️ RSI {rsi:.1f} is overbought")
+                elif rsi<40:
+                    score-=1;warnings.append(f"⚠️ RSI {rsi:.1f} is weak")
+            if latest/hi*100>=98:
+                warnings.append("⚠️ Price is very close to the 52W high; breakout confirmation matters.")
+            label="STRONG BUY" if score>=6 else "BUY" if score>=3 else "WATCH" if score>=0 else "AVOID"
             cs=st.columns(4)
             for col,v in zip(cs,[("LATEST",f"₹{latest:,.2f}",f"{(latest/prev-1)*100:+.2f}%"),("52W RANGE",f"₹{lo:,.0f}–₹{hi:,.0f}",f"{latest/hi*100:.1f}% of high"),("RSI14",f"{rsi:.1f}","Momentum"),("CONSENSUS",label,f"Score +{score}")]):
                 with col:st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
@@ -137,9 +186,20 @@ elif page=="🧠 Pro Analyzer":
             for col,color in [("SMA20","#f59e0b"),("SMA50","#a78bfa"),("SMA200","#38bdf8"),("EMA9","#22c55e")]:fig.add_trace(go.Scatter(x=x.index,y=x[col],name=col,line=dict(color=color,width=1.4)))
             fig.update_layout(height=620,template="plotly_dark",xaxis_rangeslider_visible=False)
             st.plotly_chart(fig,use_container_width=True)
+            if warnings:
+                st.markdown('<div class="risk-box"><b>Risk checks:</b><br>'+ "<br>".join(warnings) +'</div>', unsafe_allow_html=True)
+
             a,b=st.columns(2)
-            with a:st.markdown("### 🎯 Medium-Term Investment");st.markdown(f'<div class="badge">{label}</div>',unsafe_allow_html=True);[st.markdown(f'<div class="factor">{f}</div>',unsafe_allow_html=True) for f in factors]
-            with b:st.markdown("### ⚡ Short-Term Swing");[st.markdown(f'<div class="factor">{f}</div>',unsafe_allow_html=True) for f in factors[-3:]]
+            with a:
+                st.markdown("### 🎯 Medium-Term Investment")
+                st.markdown(f'<div class="badge">{label}</div>',unsafe_allow_html=True)
+                [st.markdown(f'<div class="factor">{f}</div>',unsafe_allow_html=True) for f in factors]
+                [st.markdown(f'<div class="factor">{w}</div>',unsafe_allow_html=True) for w in warnings[:3]]
+            with b:
+                st.markdown("### ⚡ Short-Term Swing")
+                swing_factors=(factors[-3:] if len(factors)>=3 else factors)
+                [st.markdown(f'<div class="factor">{f}</div>',unsafe_allow_html=True) for f in swing_factors]
+                [st.markdown(f'<div class="factor">{w}</div>',unsafe_allow_html=True) for w in warnings[:2]]
             atr=float(x.ATR14.iloc[-1]);stop=latest-1.5*atr;risk=latest-stop;t1=latest+1.5*risk;t2=latest+3*risk
             st.markdown("### 🛡️ Trade Execution & Risk")
             cs=st.columns(5)
@@ -147,11 +207,45 @@ elif page=="🧠 Pro Analyzer":
                 with col:st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{("₹"+format(v[1],",.2f")) if isinstance(v[1],float) else v[1]}</b></div>',unsafe_allow_html=True)
 
 elif page=="🚀 Swing Screeners":
-    st.markdown("## 🚀 Famous Swing-Trading Screener Library");name=st.selectbox("Preset",list(SCREENERS));st.info(SCREENERS[name]);size=st.selectbox("Universe size",[100,250,500,1000,"All"],index=1)
+    st.markdown("## 🚀 Famous Swing-Trading Screener Library")
+    st.caption("Rule-based candidates only. The app now penalizes extreme overbought conditions instead of blindly rewarding momentum.")
+
+    if st.button("🏆 Build Top Swing Picks Today", type="primary", key="top_picks"):
+        syms=universe()[:500]
+        with st.spinner("Scanning 500 liquid-listed symbols for technical setups..."):
+            snap=bulk_snapshot(tuple(syms),"1y")
+        if snap is not None and not snap.empty:
+            z=snap.copy()
+            z["Score"]=0
+            z.loc[(z["% of 52W High"]>=95),"Score"]+=2
+            z.loc[(z["Latest"]>z["SMA50"]),"Score"]+=2
+            z.loc[(z["SMA50"]>z["SMA200"]),"Score"]+=2
+            z.loc[(z["1W %"]>0),"Score"]+=1
+            z.loc[(z["1M %"]>0),"Score"]+=1
+            z.loc[(z["Volume Ratio"]>=1.3),"Score"]+=1
+            z.loc[(z["RSI14"]>80),"Score"]-=3
+            z.loc[(z["RSI14"]>70)&(z["RSI14"]<=80),"Score"]-=1
+            z=z.sort_values(["Score","1M %"],ascending=False).head(9)
+            st.session_state["top_picks_today"]=z
+
+    top=st.session_state.get("top_picks_today")
+    if isinstance(top,pd.DataFrame) and not top.empty:
+        st.markdown("### 🏆 Top Swing Picks Today")
+        st.markdown('<div class="clean-table-note">Scored from trend, breakout, recent returns, volume and RSI risk filters.</div>',unsafe_allow_html=True)
+        cols=st.columns(3)
+        for i,(_,r) in enumerate(top.iterrows()):
+            with cols[i%3]:
+                risk="High overbought risk" if r["RSI14"]>80 else "Overbought watch" if r["RSI14"]>70 else "Normal"
+                st.markdown(
+                    f'<div class="pick-card"><span class="pick-badge">Score {int(r["Score"])}</span><b>{r["Symbol"]}</b><span>₹{r["Latest"]:.2f}</span><small>1W {r["1W %"]:+.2f}% · 1M {r["1M %"]:+.2f}% · RSI {r["RSI14"]:.1f}</small><small>{risk}</small></div>',
+                    unsafe_allow_html=True
+                )
+
+    name=st.selectbox("Preset",list(SCREENERS));st.info(SCREENERS[name]);size=st.selectbox("Universe size",[100,250,500,1000,"All"],index=1)
     if st.button("🔥 Run Screener",type="primary"):
         syms=universe();syms=syms if size=="All" else syms[:int(size)]
         with st.spinner("Downloading market history in batches..."):snap=bulk_snapshot(tuple(syms),"1y");res=run_screen(snap,name)
-        st.dataframe(res,use_container_width=True,height=600,hide_index=True);st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
+        res=clean_display(res);st.dataframe(res,use_container_width=True,height=600,hide_index=True);st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
 
 elif page=="🌐 All NSE Performance":
     st.markdown("## 🌐 All NSE Performance & Closing-Price Hub");syms=universe();st.success(f"Universe loaded: {len(syms):,} symbols")
@@ -165,15 +259,39 @@ elif page=="🌐 All NSE Performance":
         st.session_state.perf=p
     p=st.session_state.get("perf")
     if isinstance(p,pd.DataFrame) and not p.empty:
-        p=p.sort_values(sort,ascending=False,na_position="last");st.dataframe(p,use_container_width=True,height=650,hide_index=True);st.download_button("⬇️ Download Performance CSV",p.to_csv(index=False).encode(),"nse_performance.csv","text/csv")
+        p=p.sort_values(sort,ascending=False,na_position="last");p=clean_display(p);st.dataframe(p,use_container_width=True,height=650,hide_index=True);st.download_button("⬇️ Download Performance CSV",p.to_csv(index=False).encode(),"nse_performance.csv","text/csv")
 
 elif page=="🏦 Institutional Watch":
     st.markdown("## 🏦 Institutional / FII-DII Watch")
-    st.warning("Price data alone cannot prove FII/DII buying. Use real quarterly holding or NSE disclosed-deal data.")
-    up=st.file_uploader("Upload FII/DII holding CSV",type=["csv"])
-    if up:
-        d=pd.read_csv(up);st.dataframe(d,use_container_width=True)
-    st.info("The next upgrade can connect verified bulk/block-deal and shareholding data. The app will not invent FII/DII activity from volume.")
+    st.warning("Price/volume cannot prove FII/DII buying. This page separates verified ownership/deal evidence from technical participation.")
+
+    t1,t2,t3=st.tabs(["📈 Quarterly Holding Change","💼 Bulk / Block Deals","📊 Institutional-Style Momentum"])
+    with t1:
+        st.markdown("### Upload shareholding history")
+        st.caption("Expected columns can include: Symbol, FII Current %, FII Previous %, DII Current %, DII Previous %.")
+        up=st.file_uploader("Upload FII/DII holding CSV",type=["csv"],key="fii_holdings")
+        if up:
+            d=pd.read_csv(up)
+            for a,b,n in [("FII Current %","FII Previous %","FII Change"),("DII Current %","DII Previous %","DII Change")]:
+                if a in d.columns and b in d.columns:
+                    d[n]=pd.to_numeric(d[a],errors="coerce")-pd.to_numeric(d[b],errors="coerce")
+            sort_cols=[c for c in ["FII Change","DII Change"] if c in d.columns]
+            if sort_cols:
+                d=d.sort_values(sort_cols,ascending=False)
+            st.dataframe(clean_display(d),use_container_width=True,height=560)
+    with t2:
+        st.markdown("### Verified disclosed deals layer")
+        st.info("This V2 keeps the UI ready for real NSE bulk/block deal ingestion. Do not treat unusual volume as a disclosed institutional deal.")
+        st.write("Next reliable integration: scheduled ingestion of NSE bulk/block deal files or broker/API disclosure feed.")
+    with t3:
+        st.markdown("### Participation proxy")
+        st.caption("This is a technical proxy only — not FII/DII ownership evidence.")
+        if st.button("Run High Volume Breakout Proxy",key="inst_proxy"):
+            syms=universe()[:500]
+            with st.spinner("Scanning price + volume participation..."):
+                snap=bulk_snapshot(tuple(syms),"1y")
+                res=run_screen(snap,"High Volume Breakout")
+            st.dataframe(clean_display(res),use_container_width=True,height=560,hide_index=True)
 
 else:
     st.markdown("## 💾 Market Data Hub")
