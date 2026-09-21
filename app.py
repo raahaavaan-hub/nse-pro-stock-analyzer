@@ -898,92 +898,58 @@ if page=="🏠 Dashboard":
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
 elif page=="🔥 Market Heatmap":
-    st.markdown("<div class='hero'><div class='eyebrow'>NSE MARKET OVERVIEW</div><h1>🔥 Market Heatmap</h1><p>One-screen view of the broad Indian market. Green = up, red = down, grey = unchanged.</p></div>",unsafe_allow_html=True)
+    st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. View NIFTY 50, 100, 200 or a wider NSE stock set.</p></div>",unsafe_allow_html=True)
+    universe_name=st.selectbox("Stock universe",["NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500"],key="heat_stock_universe")
+    if st.button("↻ Refresh",key="heat_stock_refresh"):
+        st.cache_data.clear(); st.rerun()
 
-    h1,h2=st.columns([4,1])
-    with h1:
-        heat_mode=st.radio("Heatmap",["Broad Market","Sectoral"],horizontal=True,key="pro_heat_mode")
-    with h2:
-        if st.button("↻ Refresh",use_container_width=True,key="pro_heat_refresh"):
-            try:
-                nse_all_indices.clear()
-            except Exception:
-                pass
-            st.rerun()
+    nifty50=["ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO","BAJFINANCE","BAJAJFINSV","BEL","BHARTIARTL","CIPLA","COALINDIA","DRREDDY","EICHERMOT","ETERNAL","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK","INFY","ITC","JIOFIN","JSWSTEEL","KOTAKBANK","LT","M&M","MARUTI","NESTLEIND","NTPC","ONGC","POWERGRID","RELIANCE","SBILIFE","SBIN","SHRIRAMFIN","SUNPHARMA","TATACONSUM","TATAMOTORS","TATASTEEL","TCS","TECHM","TITAN","TRENT","ULTRACEMCO","WIPRO"]
+    target={"NIFTY 50":50,"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
+    syms=nifty50 if target==50 else (nifty50+[s for s in universe() if s not in nifty50])[:target]
 
-    def pro_heat_color(v):
-        try:x=float(v)
-        except:x=0
-        if x>=3:return "#08783e"
-        if x>=1:return "#109b52"
-        if x>0:return "#38b96b"
-        if x<=-3:return "#a80f16"
-        if x<=-1:return "#d01b2c"
-        if x<0:return "#ef7a86"
-        return "#64748b"
+    @st.cache_data(ttl=300,show_spinner=False)
+    def stock_heat_prices(symbols):
+        result=[]
+        for k in range(0,len(symbols),100):
+            batch=symbols[k:k+100]; tick=[s+".NS" for s in batch]
+            try: data=yf.download(tick,period="5d",interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
+            except Exception: continue
+            for s,t in zip(batch,tick):
+                try:
+                    d=data if len(batch)==1 else data[t]
+                    c=d["Close"].dropna()
+                    if len(c)<1: continue
+                    last=float(c.iloc[-1]); prev=float(c.iloc[-2]) if len(c)>1 else last
+                    result.append((s,last,last-prev,(last-prev)/prev*100 if prev else 0))
+                except Exception: pass
+        return result
 
-    broad_names=[
-        "NIFTY 50","NIFTY NEXT 50","NIFTY 100","NIFTY 200","NIFTY 500",
-        "NIFTY MIDCAP 50","NIFTY MIDCAP 100","NIFTY MIDCAP 150",
-        "NIFTY SMLCAP 50","NIFTY SMLCAP 100","NIFTY SMLCAP 250",
-        "NIFTY LARGEMIDCAP 250","NIFTY MIDSMALLCAP 400","NIFTY TOTAL MARKET",
-        "NIFTY MICROCAP 250","NIFTY500 MULTICAP 50:25:25"
-    ]
-    sector_names=[
-        "NIFTY AUTO","NIFTY BANK","NIFTY FINANCIAL SERVICES","NIFTY FMCG","NIFTY IT",
-        "NIFTY MEDIA","NIFTY METAL","NIFTY PHARMA","NIFTY PSU BANK","NIFTY PRIVATE BANK",
-        "NIFTY REALTY","NIFTY HEALTHCARE INDEX","NIFTY CONSUMER DURABLES","NIFTY OIL & GAS",
-        "NIFTY CHEMICALS","NIFTY CEMENT"
-    ]
-
-    all_idx=nse_all_indices()
-    wanted=broad_names if heat_mode=="Broad Market" else sector_names
-    tile_rows=_pick_nse_indices(all_idx,wanted)
-
-    if not tile_rows:
-        st.warning("NSE index feed is temporarily unavailable. Use Refresh after a few seconds.")
+    rows=stock_heat_prices(syms)
+    if not rows: st.warning("Stock data unavailable. Press Refresh.")
     else:
-        up=sum(1 for r in tile_rows if (r.get("pct") or 0)>0)
-        down=sum(1 for r in tile_rows if (r.get("pct") or 0)<0)
-        flat=len(tile_rows)-up-down
-        a,b,c,d=st.columns(4)
-        a.metric("Indices",len(tile_rows))
-        b.metric("🟢 Up",up)
-        c.metric("🔴 Down",down)
-        d.metric("⚪ Flat",flat)
-
+        up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows)
+        m=st.columns(4); m[0].metric("Stocks",len(rows));m[1].metric("🟢 Up",up);m[2].metric("🔴 Down",down);m[3].metric("⚪ Flat",len(rows)-up-down)
+        def hc(x):
+            if x>=5:return "#04783d"
+            if x>=2:return "#0b9f50"
+            if x>0:return "#38b96b"
+            if x<=-5:return "#a40f1d"
+            if x<=-2:return "#d7273b"
+            if x<0:return "#ef7a86"
+            return "#64748b"
         cards=[]
-        for row in tile_rows:
-            name=row.get("name","")
-            val=row.get("last")
-            chg=row.get("pct")
-            point=row.get("change")
-            val_txt="—" if val is None else f"{val:,.2f}"
-            pct_txt="—" if chg is None else f"{chg:+.2f}%"
-            point_txt="" if point is None else f"{point:+,.2f} pts · "
-            cards.append(
-                f"<div class='nse-heat-card' style='background:{pro_heat_color(chg)}'>"
-                f"<div class='nse-heat-name'>{html.escape(name)}</div>"
-                f"<div class='nse-heat-value'>{val_txt}</div>"
-                f"<div class='nse-heat-change'>{point_txt}{pct_txt}</div>"
-                f"</div>"
-            )
-        st.caption("Official NSE index feed · value, point change and percentage change")
+        for s,last,ch,pct in rows:
+            cards.append(f"<div class='nse-heat-card' style='background:{hc(pct)};min-height:82px'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div>")
+        st.caption(f"{universe_name} individual-stock heatmap · latest close and daily change")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
-
-        ranked=sorted(tile_rows,key=lambda r:(r.get("pct") if r.get("pct") is not None else -999),reverse=True)
-        st.markdown("### Market overview")
-        left,right=st.columns(2)
-        with left:
-            st.markdown("**Strongest indices**")
-            for r in ranked[:5]:
-                p=r.get("pct")
-                st.write(f"🟢 {r.get('name','')}  {('—' if p is None else f'{p:+.2f}%')}")
-        with right:
-            st.markdown("**Weakest indices**")
-            for r in ranked[-5:][::-1]:
-                p=r.get("pct")
-                st.write(f"🔴 {r.get('name','')}  {('—' if p is None else f'{p:+.2f}%')}")
+        ranked=sorted(rows,key=lambda x:x[3],reverse=True)
+        l,r=st.columns(2)
+        with l:
+            st.markdown("### 🟢 Top gainers")
+            for s,last,ch,pct in ranked[:10]: st.write(f"**{s}** · {pct:+.2f}%")
+        with r:
+            st.markdown("### 🔴 Top losers")
+            for s,last,ch,pct in ranked[-10:][::-1]: st.write(f"**{s}** · {pct:+.2f}%")
 
 elif page=="🧠 Pro Analyzer":
     syms=universe()
