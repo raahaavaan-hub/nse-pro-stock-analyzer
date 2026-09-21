@@ -877,6 +877,21 @@ st.markdown("""
 
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+# Heatmap tile deep-link: open Pro Analyzer and preload the clicked symbol.
+try:
+    _heat_analyze=st.query_params.get("heat_analyze")
+except Exception:
+    _heat_analyze=None
+if _heat_analyze:
+    st.session_state["main_page"]="🧠 Pro Analyzer"
+    # Common analyzer symbol keys used by this app / retained as fallback.
+    st.session_state["pro_symbol_from_heatmap"]=str(_heat_analyze).upper()
+    page="🧠 Pro Analyzer"
+    try:
+        del st.query_params["heat_analyze"]
+    except Exception:
+        pass
+
 
 st.sidebar.markdown("---")
 st.sidebar.link_button(
@@ -900,12 +915,14 @@ if page=="🏠 Dashboard":
 elif page=="🔥 Market Heatmap":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. Review an index group or the full NSE equity universe.</p></div>",unsafe_allow_html=True)
 
-    f1,f2,f3=st.columns([2,2,1])
+    f1,f2,f3,f4=st.columns([2,2,2,1])
     with f1:
         universe_name=st.selectbox("Stocks",["ALL NSE","NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500"],index=0,key="heat_stock_universe")
     with f2:
-        sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
+        heat_period=st.selectbox("Performance",["1 Day","1 Week","1 Month","3 Months","6 Months","1 Year","5 Years"],index=0,key="heat_period")
     with f3:
+        sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
+    with f4:
         if st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh"):
             st.cache_data.clear(); st.rerun()
 
@@ -921,12 +938,22 @@ elif page=="🔥 Market Heatmap":
         syms=(nifty50+[s for s in all_syms if s not in nifty50])[:target]
 
     @st.cache_data(ttl=300,show_spinner=False)
-    def stock_heat_prices(symbols):
+    def stock_heat_prices(symbols,period_label):
+        cfg={
+            "1 Day":("5d",1),
+            "1 Week":("1mo",5),
+            "1 Month":("3mo",21),
+            "3 Months":("6mo",63),
+            "6 Months":("1y",126),
+            "1 Year":("2y",252),
+            "5 Years":("5y",1260),
+        }
+        yf_period,lookback=cfg[period_label]
         result=[]
         for k in range(0,len(symbols),100):
             batch=symbols[k:k+100]; tick=[s+".NS" for s in batch]
             try:
-                data=yf.download(tick,period="5d",interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
+                data=yf.download(tick,period=yf_period,interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
             except Exception:
                 continue
             for s,t in zip(batch,tick):
@@ -934,15 +961,17 @@ elif page=="🔥 Market Heatmap":
                     d=data if len(batch)==1 else data[t]
                     c=d["Close"].dropna()
                     if len(c)<1: continue
-                    last=float(c.iloc[-1]); prev=float(c.iloc[-2]) if len(c)>1 else last
-                    ch=last-prev; pct=(ch/prev*100) if prev else 0
+                    last=float(c.iloc[-1])
+                    # Compare with the closest available trading close at/before the requested lookback.
+                    base=float(c.iloc[-(lookback+1)]) if len(c)>lookback else float(c.iloc[0])
+                    ch=last-base; pct=(ch/base*100) if base else 0
                     result.append((s,last,ch,pct))
                 except Exception:
                     pass
         return result
 
-    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks..."):
-        rows=stock_heat_prices(syms)
+    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
+        rows=stock_heat_prices(syms,heat_period)
 
     if not rows:
         st.warning("Stock data unavailable. Press Refresh.")
@@ -976,11 +1005,22 @@ elif page=="🔥 Market Heatmap":
 
         cards=[]
         for s,last,ch,pct in rows:
-            cards.append(f"<div class='nse-heat-card' style='background:{hc(pct)};min-height:82px'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div>")
-        st.caption(f"{universe_name} · {len(rows):,} displayed · latest close and daily change")
+            # Query parameter lets a heatmap tile deep-link into Pro Analyzer.
+            href=f"?heat_analyze={quote(s)}"
+            cards.append(f"<a href='{href}' target='_self' style='text-decoration:none;color:white'><div class='nse-heat-card' style='background:{hc(pct)};min-height:82px;cursor:pointer'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div></a>")
+        st.caption(f"{universe_name} · {len(rows):,} displayed · {heat_period} performance · click a stock to open Pro Analyzer")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
 elif page=="🧠 Pro Analyzer":
+    _heat_symbol=st.session_state.pop("pro_symbol_from_heatmap",None)
+    if _heat_symbol:
+        # Preload the analyzer's stock selector/input where possible.
+        for _k in ["analyze_symbol","pro_symbol","symbol","ticker","stock_symbol","selected_symbol"]:
+            if _k in st.session_state:
+                st.session_state[_k]=_heat_symbol
+        st.session_state["heatmap_selected_symbol"]=_heat_symbol
+        st.info(f"🔥 Opened from Heatmap: {_heat_symbol}")
+
     syms=universe()
     if "analyzer_symbol" not in st.session_state:
         st.session_state["analyzer_symbol"]="TBZ" if "TBZ" in syms else syms[0]
