@@ -964,7 +964,7 @@ elif page=="🔥 Market Heatmap":
 
     f1,f2,f3,f4=st.columns([2,2,2,1])
     with f1:
-        universe_name=st.selectbox("Stocks",["ALL NSE","NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500"],index=0,key="heat_stock_universe")
+        universe_name=st.selectbox("Stocks",["NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500","ALL NSE"],index=0,key="heat_stock_universe")
     with f2:
         heat_period=st.selectbox("Performance",["1 Day","1 Week","1 Month","3 Months","6 Months","1 Year","5 Years"],index=0,key="heat_period")
     with f3:
@@ -978,17 +978,21 @@ elif page=="🔥 Market Heatmap":
 
     nifty50=["ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO","BAJFINANCE","BAJAJFINSV","BEL","BHARTIARTL","CIPLA","COALINDIA","DRREDDY","EICHERMOT","ETERNAL","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK","INFY","ITC","JIOFIN","JSWSTEEL","KOTAKBANK","LT","M&M","MARUTI","NESTLEIND","NTPC","ONGC","POWERGRID","RELIANCE","SBILIFE","SBIN","SHRIRAMFIN","SUNPHARMA","TATACONSUM","TATAMOTORS","TATASTEEL","TCS","TECHM","TITAN","TRENT","ULTRACEMCO","WIPRO"]
 
-    all_syms=list(dict.fromkeys(universe()))
-    if universe_name=="ALL NSE":
-        syms=all_syms
+    # Fast first paint: NIFTY 50 needs no full-universe lookup.
+    if universe_name=="NIFTY 50":
+        syms=nifty50
     else:
-        target={"NIFTY 50":50,"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
-        syms=(nifty50+[s for s in all_syms if s not in nifty50])[:target]
+        all_syms=list(dict.fromkeys(universe()))
+        if universe_name=="ALL NSE":
+            syms=all_syms
+        else:
+            target={"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
+            syms=(nifty50+[x for x in all_syms if x not in nifty50])[:target]
 
     @st.cache_data(ttl=300,show_spinner=False)
     def stock_heat_prices(symbols,period_label):
         cfg={
-            "1 Day":("5d",1),
+            "1 Day":("2d",1),
             "1 Week":("1mo",5),
             "1 Month":("3mo",21),
             "3 Months":("6mo",63),
