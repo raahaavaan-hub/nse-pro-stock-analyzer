@@ -1,6 +1,5 @@
 
-import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
-import plotly.graph_objects as go
+import io, re, html, requests, numpy as np, pandas as pd, streamlit as st
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
@@ -67,6 +66,12 @@ NSE_URL="https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 HEADERS={"User-Agent":"Mozilla/5.0"}
 FALLBACK=["RELIANCE","TCS","HDFCBANK","ICICIBANK","INFY","ITC","SBIN","LT","AXISBANK","SUZLON","TBZ"]
 
+
+def _yf():
+    """Import yfinance only when a market-data module actually needs it."""
+    import yfinance
+    return yfinance
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def universe():
     try:
@@ -82,7 +87,7 @@ def universe():
 @st.cache_data(ttl=900, show_spinner=False)
 def one_stock(sym, period):
     t=sym+".NS"
-    d=yf.download(t,period=period,interval="1d",auto_adjust=False,progress=False,threads=False)
+    d=_yf().download(t,period=period,interval="1d",auto_adjust=False,progress=False,threads=False)
     if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
     return d[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
 
@@ -107,7 +112,7 @@ def bulk_snapshot(symbols_tuple, period="5y"):
     syms=list(symbols_tuple); rows=[]
     for k in range(0,len(syms),70):
         batch=syms[k:k+70]; ticks=[s+".NS" for s in batch]
-        try:d=yf.download(ticks,period=period,interval="1d",group_by="column",auto_adjust=False,progress=False,threads=True)
+        try:d=_yf().download(ticks,period=period,interval="1d",group_by="column",auto_adjust=False,progress=False,threads=True)
         except:continue
         if d is None or d.empty:continue
         for s,t in zip(batch,ticks):
@@ -229,7 +234,7 @@ def symbol_from_headline(text, symbols):
 @st.cache_data(ttl=900, show_spinner=False)
 def current_and_call_price(symbol, call_date_text):
     try:
-        d=yf.download(symbol+".NS",period="1y",interval="1d",auto_adjust=False,progress=False,threads=False)
+        d=_yf().download(symbol+".NS",period="1y",interval="1d",auto_adjust=False,progress=False,threads=False)
         if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
         if d.empty:return None,None
         cur=float(d["Close"].dropna().iloc[-1])
@@ -266,7 +271,7 @@ def broker_calls_from_news(broker, symbols, limit=20):
 @st.cache_data(ttl=21600, show_spinner=False)
 def fundamentals_for_stock(sym):
     try:
-        info=yf.Ticker(sym+".NS").info or {}
+        info=_yf().Ticker(sym+".NS").info or {}
         keys=["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets","operatingMargins","grossMargins","ebitdaMargins","debtToEquity","currentRatio","quickRatio","freeCashflow","operatingCashflow","trailingPE","forwardPE","priceToBook","bookValue","trailingEps","forwardEps","dividendYield","beta","profitMargins","marketCap","enterpriseValue","totalRevenue","fullTimeEmployees","longName","sector","industry","longBusinessSummary","website","city","country","companyOfficers","heldPercentInstitutions","heldPercentInsiders"]
         return {k:info.get(k) for k in keys}
     except Exception:
@@ -275,7 +280,7 @@ def fundamentals_for_stock(sym):
 @st.cache_data(ttl=300, show_spinner=False)
 def intraday_stock(sym):
     try:
-        d=yf.download(sym+".NS",period="5d",interval="15m",auto_adjust=False,progress=False,threads=False)
+        d=_yf().download(sym+".NS",period="5d",interval="15m",auto_adjust=False,progress=False,threads=False)
         if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
         if d is None or d.empty:return pd.DataFrame()
         return d[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
@@ -875,8 +880,14 @@ st.markdown("""
 </style>
 """,unsafe_allow_html=True)
 
+# Fast-start safety: old sessions may still contain the removed Heatmap page.
+_valid_pages=["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"]
+if st.session_state.get("main_page") not in (None,*_valid_pages):
+    st.session_state["main_page"]="🏠 Dashboard"
+
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+
 
 st.sidebar.markdown("---")
 st.sidebar.link_button(
@@ -885,6 +896,66 @@ st.sidebar.link_button(
     use_container_width=True
 )
 st.sidebar.caption("Open the live app.py file directly when you want to update the website.")
+
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def PA_nse_shareholding(symbol):
+    """Best-effort official NSE shareholding pattern loader."""
+    base="https://www.nseindia.com"
+    h={"User-Agent":"Mozilla/5.0","Accept":"application/json,text/plain,*/*",
+       "Referer":base+"/companies-listing/corporate-filings-shareholding-pattern"}
+    sess=requests.Session(); sess.headers.update(h)
+    try:sess.get(base,timeout=8)
+    except Exception:pass
+    urls=[
+      f"{base}/api/corporate-share-holdings-master?index=equities&symbol={symbol}",
+      f"{base}/api/corporate-share-holdings?index=equities&symbol={symbol}"
+    ]
+    payload=None
+    for u in urls:
+        try:
+            rr=sess.get(u,timeout=12)
+            if rr.ok and rr.text.strip():
+                payload=rr.json()
+                if payload:break
+        except Exception:pass
+    if not payload:return pd.DataFrame()
+
+    records=[]
+    def walk(v):
+        if isinstance(v,list):
+            for z in v:walk(z)
+        elif isinstance(v,dict):
+            lk=" ".join(str(k).lower() for k in v)
+            if any(w in lk for w in ["fii","dii","promoter","public","foreign institutional","foreign portfolio"]):
+                records.append(v)
+            for z in v.values():
+                if isinstance(z,(dict,list)):walk(z)
+    walk(payload)
+
+    def val(d,terms):
+        for k,v in d.items():
+            k=str(k).lower().replace("_"," ")
+            if any(t in k for t in terms):
+                try:return float(str(v).replace("%","").replace(",","").strip())
+                except:pass
+        return None
+    rows=[]
+    for d in records:
+        period=""
+        for k,v in d.items():
+            if any(t in str(k).lower() for t in ["date","quarter","period","as on"]):
+                if v not in (None,""):period=str(v);break
+        row={"Period":period,
+             "Promoters":val(d,["promoter"]),
+             "FII":val(d,["fii","foreign institutional","foreign portfolio"]),
+             "DII":val(d,["dii","domestic institutional","mutual fund"]),
+             "Government":val(d,["government"]),
+             "Public":val(d,["public"]),
+             "Others":val(d,["others","other"]),
+             "Shareholders":val(d,["shareholder"])}
+        if any(row[k] is not None for k in ["Promoters","FII","DII","Government","Public","Others"]):rows.append(row)
+    return pd.DataFrame(rows).drop_duplicates().tail(12) if rows else pd.DataFrame()
 
 if page=="🏠 Dashboard":
     st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
@@ -897,185 +968,207 @@ if page=="🏠 Dashboard":
         with col:
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
-elif page=="🔥 Market Heatmap":
-    st.markdown("<div class='hero'><div class='eyebrow'>NSE MARKET OVERVIEW</div><h1>🔥 Market Heatmap</h1><p>One-screen view of the broad Indian market. Green = up, red = down, grey = unchanged.</p></div>",unsafe_allow_html=True)
-
-    h1,h2=st.columns([4,1])
-    with h1:
-        heat_mode=st.radio("Heatmap",["Broad Market","Sectoral"],horizontal=True,key="pro_heat_mode")
-    with h2:
-        if st.button("↻ Refresh",use_container_width=True,key="pro_heat_refresh"):
-            try:
-                nse_all_indices.clear()
-            except Exception:
-                pass
-            st.rerun()
-
-    def pro_heat_color(v):
-        try:x=float(v)
-        except:x=0
-        if x>=3:return "#08783e"
-        if x>=1:return "#109b52"
-        if x>0:return "#38b96b"
-        if x<=-3:return "#a80f16"
-        if x<=-1:return "#d01b2c"
-        if x<0:return "#ef7a86"
-        return "#64748b"
-
-    broad_names=[
-        "NIFTY 50","NIFTY NEXT 50","NIFTY 100","NIFTY 200","NIFTY 500",
-        "NIFTY MIDCAP 50","NIFTY MIDCAP 100","NIFTY MIDCAP 150",
-        "NIFTY SMLCAP 50","NIFTY SMLCAP 100","NIFTY SMLCAP 250",
-        "NIFTY LARGEMIDCAP 250","NIFTY MIDSMALLCAP 400","NIFTY TOTAL MARKET",
-        "NIFTY MICROCAP 250","NIFTY500 MULTICAP 50:25:25"
-    ]
-    sector_names=[
-        "NIFTY AUTO","NIFTY BANK","NIFTY FINANCIAL SERVICES","NIFTY FMCG","NIFTY IT",
-        "NIFTY MEDIA","NIFTY METAL","NIFTY PHARMA","NIFTY PSU BANK","NIFTY PRIVATE BANK",
-        "NIFTY REALTY","NIFTY HEALTHCARE INDEX","NIFTY CONSUMER DURABLES","NIFTY OIL & GAS",
-        "NIFTY CHEMICALS","NIFTY CEMENT"
-    ]
-
-    all_idx=nse_all_indices()
-    wanted=broad_names if heat_mode=="Broad Market" else sector_names
-    tile_rows=_pick_nse_indices(all_idx,wanted)
-
-    if not tile_rows:
-        st.warning("NSE index feed is temporarily unavailable. Use Refresh after a few seconds.")
-    else:
-        up=sum(1 for r in tile_rows if (r.get("pct") or 0)>0)
-        down=sum(1 for r in tile_rows if (r.get("pct") or 0)<0)
-        flat=len(tile_rows)-up-down
-        a,b,c,d=st.columns(4)
-        a.metric("Indices",len(tile_rows))
-        b.metric("🟢 Up",up)
-        c.metric("🔴 Down",down)
-        d.metric("⚪ Flat",flat)
-
-        cards=[]
-        for row in tile_rows:
-            name=row.get("name","")
-            val=row.get("last")
-            chg=row.get("pct")
-            point=row.get("change")
-            val_txt="—" if val is None else f"{val:,.2f}"
-            pct_txt="—" if chg is None else f"{chg:+.2f}%"
-            point_txt="" if point is None else f"{point:+,.2f} pts · "
-            cards.append(
-                f"<div class='nse-heat-card' style='background:{pro_heat_color(chg)}'>"
-                f"<div class='nse-heat-name'>{html.escape(name)}</div>"
-                f"<div class='nse-heat-value'>{val_txt}</div>"
-                f"<div class='nse-heat-change'>{point_txt}{pct_txt}</div>"
-                f"</div>"
-            )
-        st.caption("Official NSE index feed · value, point change and percentage change")
-        st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
-
-        ranked=sorted(tile_rows,key=lambda r:(r.get("pct") if r.get("pct") is not None else -999),reverse=True)
-        st.markdown("### Market overview")
-        left,right=st.columns(2)
-        with left:
-            st.markdown("**Strongest indices**")
-            for r in ranked[:5]:
-                p=r.get("pct")
-                st.write(f"🟢 {r.get('name','')}  {('—' if p is None else f'{p:+.2f}%')}")
-        with right:
-            st.markdown("**Weakest indices**")
-            for r in ranked[-5:][::-1]:
-                p=r.get("pct")
-                st.write(f"🔴 {r.get('name','')}  {('—' if p is None else f'{p:+.2f}%')}")
-
 elif page=="🧠 Pro Analyzer":
-    syms=universe()
-    if "analyzer_symbol" not in st.session_state:
-        st.session_state["analyzer_symbol"]="TBZ" if "TBZ" in syms else syms[0]
-    elif st.session_state["analyzer_symbol"] not in syms:
-        st.session_state["analyzer_symbol"]="TBZ" if "TBZ" in syms else syms[0]
+    st.markdown("<div class='hero'><div class='eyebrow'>FAST STOCK RESEARCH</div><h1>🧠 Pro Analyzer</h1><p>Fast first load. Heavy financial statements, investors, peers and news load only when you open that section.</p></div>",unsafe_allow_html=True)
 
-    sym=st.selectbox("NSE symbol",syms,key="analyzer_symbol")
-    period=st.select_slider("Period",["3mo","6mo","1y","2y","5y"],value=st.session_state.get("analyzer_period","1y"),key="analyzer_period")
-    analyze_clicked=st.button("⚡ Analyze",type="primary")
-    auto_analyze=bool(st.session_state.pop("auto_analyze",False))
+    _default_symbol=str(st.session_state.get("analyzer_symbol","RELIANCE")).replace(".NS","").upper()
+    _all_symbols=list(dict.fromkeys(universe()))
+    if _default_symbol not in _all_symbols:_all_symbols=[_default_symbol]+_all_symbols
 
-    if analyze_clicked or auto_analyze:
-        with st.spinner("Fetching market data..."):d=one_stock(sym,period)
-        if d.empty:st.error("No data returned. Try again.")
-        else:
-            x=ind(d);latest=float(x.Close.iloc[-1]);prev=float(x.Close.iloc[-2]);rsi=float(x.RSI14.iloc[-1]);year=x.tail(252);hi=float(year.High.max());lo=float(year.Low.min())
-            score=0;factors=[];warnings=[]
-            if pd.notna(x.SMA50.iloc[-1]) and latest>x.SMA50.iloc[-1]:
-                score+=2;factors.append("✅ Price above SMA50")
-            else:
-                score-=1;warnings.append("⚠️ Price is below SMA50")
-            if pd.notna(x.SMA200.iloc[-1]) and pd.notna(x.SMA50.iloc[-1]) and x.SMA50.iloc[-1]>x.SMA200.iloc[-1]:
-                score+=2;factors.append("✅ SMA50 above SMA200")
-            elif pd.notna(x.SMA200.iloc[-1]):
-                score-=1;warnings.append("⚠️ SMA50 is not above SMA200")
-            if latest>x.EMA9.iloc[-1]:
-                score+=1;factors.append("✅ Price above EMA9")
-            else:
-                score-=1;warnings.append("⚠️ Price below EMA9")
-            if x.MACD.iloc[-1]>x.MACDS.iloc[-1]:
-                score+=1;factors.append("✅ MACD bullish")
-            else:
-                score-=1;warnings.append("⚠️ MACD not confirmed")
-            if np.isfinite(rsi):
-                if 55<=rsi<=70:
-                    score+=1;factors.append(f"✅ RSI {rsi:.1f} supports momentum")
-                elif rsi>80:
-                    score-=2;warnings.append(f"⚠️ RSI {rsi:.1f} is extremely overbought — chase risk is high")
-                elif rsi>70:
-                    score-=1;warnings.append(f"⚠️ RSI {rsi:.1f} is overbought")
-                elif rsi<40:
-                    score-=1;warnings.append(f"⚠️ RSI {rsi:.1f} is weak")
-            if latest/hi*100>=98:
-                warnings.append("⚠️ Price is very close to the 52W high; breakout confirmation matters.")
-            label="STRONG BUY" if score>=6 else "BUY" if score>=3 else "WATCH" if score>=0 else "AVOID"
+    pa1,pa2=st.columns([4,1])
+    with pa1:
+        symbol=st.selectbox("NSE stock",_all_symbols,index=_all_symbols.index(_default_symbol),key="pro_analyzer_stock")
+    with pa2:
+        st.write("")
+        if st.button("↻ Refresh stock",use_container_width=True,key="pro_analyze_btn"):
+            PA_basic.clear(); PA_statements.clear(); PA_holders.clear(); PA_chart.clear(); st.rerun()
+    ticker=symbol+".NS"
+
+    @st.cache_data(ttl=1800,show_spinner=False)
+    def PA_basic(t):
+        """Only the data needed for header/overview/analysis. Keeps first load light."""
+        tk=_yf().Ticker(t)
+        try: info=tk.info or {}
+        except Exception: info={}
+        try: hist=tk.history(period="1y",auto_adjust=False)
+        except Exception: hist=pd.DataFrame()
+        return info,hist
+
+    @st.cache_data(ttl=3600,show_spinner=False)
+    def PA_chart(t,period):
+        try:return _yf().Ticker(t).history(period=period,auto_adjust=False)
+        except Exception:return pd.DataFrame()
+
+    @st.cache_data(ttl=21600,show_spinner=False)
+    def PA_statements(t):
+        """Heavy statements are fetched only when a financial-statement section is selected."""
+        tk=_yf().Ticker(t)
+        def safe(attr):
+            try:
+                x=getattr(tk,attr)
+                return x if isinstance(x,pd.DataFrame) else pd.DataFrame()
+            except Exception:return pd.DataFrame()
+        return safe("quarterly_financials"),safe("financials"),safe("balance_sheet"),safe("cashflow")
+
+    @st.cache_data(ttl=21600,show_spinner=False)
+    def PA_holders(t):
+        tk=_yf().Ticker(t)
+        def safe(attr):
+            try:
+                x=getattr(tk,attr)
+                return x if isinstance(x,pd.DataFrame) else pd.DataFrame()
+            except Exception:return pd.DataFrame()
+        return safe("major_holders"),safe("institutional_holders")
+
+    @st.cache_data(ttl=1800,show_spinner=False)
+    def PA_company_news(t):
+        try:return _yf().Ticker(t).news or []
+        except Exception:return []
+
+    def PA_num(x):
+        try:
+            if x is None:return None
+            v=float(x); return v if pd.notna(v) else None
+        except:return None
+
+    def PA_money(x):
+        v=PA_num(x)
+        if v is None:return "N/A"
+        av=abs(v)
+        if av>=1e12:return f"₹{v/1e12:,.2f}T"
+        if av>=1e7:return f"₹{v/1e7:,.2f} Cr"
+        if av>=1e5:return f"₹{v/1e5:,.2f}L"
+        return f"₹{v:,.2f}"
+
+    def PA_pct(x,decimal=True):
+        v=PA_num(x)
+        if v is None:return "N/A"
+        if decimal and abs(v)<=2:v*=100
+        return f"{v:.2f}%"
+
+    def PA_val(info,*keys):
+        for k in keys:
+            v=info.get(k)
+            if v is not None:return v
+        return None
+
+    def PA_statement(df,title):
+        st.markdown(f"### {title}")
+        if df is None or df.empty:
+            st.info("Statement data is not available from the current market-data provider."); return
+        x=df.copy(); x.columns=[c.strftime("%b %Y") if hasattr(c,"strftime") else str(c) for c in x.columns]
+        wanted=["Total Revenue","Operating Revenue","Gross Profit","Operating Income","EBIT","EBITDA","Pretax Income","Net Income","Basic EPS","Total Assets","Current Assets","Cash Cash Equivalents And Short Term Investments","Total Liabilities Net Minority Interest","Current Liabilities","Stockholders Equity","Total Debt","Net Debt","Operating Cash Flow","Investing Cash Flow","Financing Cash Flow","Free Cash Flow","Capital Expenditure"]
+        keep=[i for i in wanted if i in x.index]
+        if keep:x=x.loc[keep]
+        x=x.iloc[:,:6]
+        def fmt(v):
+            try:
+                if pd.isna(v):return "—"
+                if abs(float(v))>=1e7:return f"{float(v)/1e7:,.2f} Cr"
+                return f"{float(v):,.2f}"
+            except:return str(v)
+        st.dataframe(x.map(fmt) if hasattr(x,"map") else x.applymap(fmt),use_container_width=True)
+
+    with st.spinner(f"Loading {symbol} overview..."):
+        info,hist=PA_basic(ticker)
+
+    last=PA_num(PA_val(info,"currentPrice","regularMarketPrice"))
+    if last is None and not hist.empty:last=float(hist["Close"].dropna().iloc[-1])
+    prev=PA_num(PA_val(info,"previousClose"))
+    change=(last-prev) if last is not None and prev else None
+    pct=(change/prev*100) if change is not None and prev else None
+    name=PA_val(info,"longName","shortName") or symbol
+    st.markdown(f"## {name}  ·  NSE: {symbol}")
+    if last is not None:
+        st.markdown(f"### ₹{last:,.2f} &nbsp; <span style='color:{'#22c55e' if (pct or 0)>=0 else '#ef4444'}'>{pct:+.2f}%</span>" if pct is not None else f"### ₹{last:,.2f}",unsafe_allow_html=True)
+
+    # Streamlit tabs execute every tab on every rerun. A radio makes heavy sections truly lazy.
+    section=st.radio("Research section",["Overview","Chart","Analysis","Peers","Quarters","Profit & Loss","Balance Sheet","Cash Flow","Ratios","Investors","News"],horizontal=True,key="pa_section")
+
+    if section=="Overview":
+        vals=[("Market Cap",PA_money(PA_val(info,"marketCap"))),("Current Price",PA_money(last)),("52W High / Low",f"{PA_money(PA_val(info,'fiftyTwoWeekHigh'))} / {PA_money(PA_val(info,'fiftyTwoWeekLow'))}"),("Stock P/E",f"{PA_num(PA_val(info,'trailingPE')):.2f}" if PA_num(PA_val(info,'trailingPE')) is not None else "N/A"),("Forward P/E",f"{PA_num(PA_val(info,'forwardPE')):.2f}" if PA_num(PA_val(info,'forwardPE')) is not None else "N/A"),("Book Value",PA_money(PA_val(info,"bookValue"))),("Price / Book",f"{PA_num(PA_val(info,'priceToBook')):.2f}" if PA_num(PA_val(info,'priceToBook')) is not None else "N/A"),("Dividend Yield",PA_pct(PA_val(info,"dividendYield"))),("ROE",PA_pct(PA_val(info,"returnOnEquity"))),("ROA",PA_pct(PA_val(info,"returnOnAssets"))),("Debt / Equity",f"{PA_num(PA_val(info,'debtToEquity')):.2f}" if PA_num(PA_val(info,'debtToEquity')) is not None else "N/A"),("EPS",f"₹{PA_num(PA_val(info,'trailingEps')):.2f}" if PA_num(PA_val(info,'trailingEps')) is not None else "N/A")]
+        for row in range(0,len(vals),4):
             cs=st.columns(4)
-            for col,v in zip(cs,[("LATEST",f"₹{latest:,.2f}",f"{(latest/prev-1)*100:+.2f}%"),("52W RANGE",f"₹{lo:,.0f}–₹{hi:,.0f}",f"{latest/hi*100:.1f}% of high"),("RSI14",f"{rsi:.1f}","Momentum"),("CONSENSUS",label,f"Score +{score}")]):
-                with col:st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
-            fig=go.Figure(go.Candlestick(x=x.index,open=x.Open,high=x.High,low=x.Low,close=x.Close,name=sym))
-            for col,color in [("SMA20","#f59e0b"),("SMA50","#a78bfa"),("SMA200","#38bdf8"),("EMA9","#22c55e")]:fig.add_trace(go.Scatter(x=x.index,y=x[col],name=col,line=dict(color=color,width=1.4)))
-            fig.update_layout(height=620,template="plotly_dark",xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig,use_container_width=True)
-            if warnings:
-                st.markdown('<div class="risk-box"><b>Risk checks:</b><br>'+ "<br>".join(warnings) +'</div>', unsafe_allow_html=True)
+            for c,(lab,val) in zip(cs,vals[row:row+4]):c.metric(lab,val)
+        l,r=st.columns([2,1])
+        with l:st.markdown("### About");st.write(PA_val(info,"longBusinessSummary") or "Company description unavailable.")
+        with r:
+            st.markdown("### Company");st.write("**Sector:**",PA_val(info,"sector") or "N/A");st.write("**Industry:**",PA_val(info,"industry") or "N/A");st.write("**Employees:**",f"{int(PA_val(info,'fullTimeEmployees')):,}" if PA_val(info,"fullTimeEmployees") else "N/A");st.write("**Website:**",PA_val(info,"website") or "N/A")
 
-            with st.spinner("Loading fundamentals and intraday confirmation..."):
-                finfo=fundamentals_for_stock(sym)
-                intraday_df=intraday_stock(sym)
+    elif section=="Chart":
+        period=st.radio("Chart period",["1mo","3mo","6mo","1y","2y","5y"],index=3,horizontal=True,key="pa_chart_period")
+        with st.spinner("Loading chart..."):ch=PA_chart(ticker,period)
+        if not ch.empty:st.line_chart(ch["Close"],use_container_width=True)
+        else:st.info("Chart data unavailable.")
 
-            fundamental_checks,fundamental_score=fundamental_checklist(finfo)
-            technical_checks,technical_score=technical_checklist(x)
+    elif section=="Analysis":
+        st.markdown("### Strengths / Risks")
+        pros=[];cons=[];pe=PA_num(PA_val(info,"trailingPE"));roe=PA_num(PA_val(info,"returnOnEquity"));de=PA_num(PA_val(info,"debtToEquity"));om=PA_num(PA_val(info,"operatingMargins"));eg=PA_num(PA_val(info,"earningsGrowth"));rg=PA_num(PA_val(info,"revenueGrowth"))
+        if roe is not None:(pros if roe>=.15 else cons).append(f"Return on equity is {roe*100:.1f}%.")
+        if de is not None:(pros if de<=50 else cons).append(f"Debt-to-equity reported by the provider is {de:.1f}.")
+        if rg is not None:(pros if rg>0 else cons).append(f"Revenue growth is {rg*100:.1f}%.")
+        if eg is not None:(pros if eg>0 else cons).append(f"Earnings growth is {eg*100:.1f}%.")
+        if om is not None and om>0:pros.append(f"Operating margin is {om*100:.1f}%.")
+        if pe is not None and pe>60:cons.append(f"Trailing P/E is {pe:.1f}, a relatively high earnings multiple.")
+        c1,c2=st.columns(2)
+        with c1:st.markdown("#### ✅ Strengths");[st.write("•",x) for x in pros] if pros else st.write("No rule-based strength triggered.")
+        with c2:st.markdown("#### ⚠️ Risks / Watch");[st.write("•",x) for x in cons] if cons else st.write("No rule-based risk triggered.")
+        st.caption("Rule-based observations, not a price prediction or recommendation.")
 
-            st.markdown("## ✅ Fundamental & Technical Scorecard")
-            left,right=st.columns(2)
-            with left:render_checklist("🏢 Fundamental Checklist",fundamental_checks,fundamental_score)
-            with right:render_checklist("📊 Technical Checklist",technical_checks,technical_score)
+    elif section=="Peers":
+        st.markdown("### Peers")
+        st.info("Peer discovery is on-demand because scanning many Yahoo company profiles is slow.")
+        if st.button("Load peers",key="pa_load_peers"):
+            sector=PA_val(info,"sector");pdata=[]
+            if sector:
+                for ps in _all_symbols[:80]:
+                    if ps==symbol:continue
+                    try:
+                        pi=fundamentals_for_stock(ps)
+                        if pi.get("sector")==sector:
+                            pdata.append({"Stock":ps,"Market Cap":pi.get("marketCap"),"P/E":pi.get("trailingPE"),"ROE %":(pi.get("returnOnEquity") or 0)*100})
+                        if len(pdata)>=8:break
+                    except:pass
+            if pdata:st.dataframe(pd.DataFrame(pdata),use_container_width=True,hide_index=True)
+            else:st.info("Automatic peer discovery unavailable.")
 
-            overall=(fundamental_score+technical_score)/2
-            st.markdown('<div class="overall-score-strip">'+
-                        f'<div class="overall-score-box"><span>Fundamental</span><b>{fundamental_score:.1f}/10</b></div>'+
-                        f'<div class="overall-score-box"><span>Technical</span><b>{technical_score:.1f}/10</b></div>'+
-                        f'<div class="overall-score-box"><span>Overall</span><b>{overall:.1f}/10</b></div>'+
-                        '</div>',unsafe_allow_html=True)
+    elif section in ["Quarters","Profit & Loss","Balance Sheet","Cash Flow"]:
+        with st.spinner("Loading financial statements..."):qpl,apl,abs_,acf=PA_statements(ticker)
+        if section=="Quarters":PA_statement(qpl,"Recent quarters")
+        elif section=="Profit & Loss":PA_statement(apl,"Annual Profit & Loss")
+        elif section=="Balance Sheet":PA_statement(abs_,"Annual Balance Sheet")
+        else:PA_statement(acf,"Annual Cash Flow")
 
-            st.markdown("## ⏱️ Buy / Hold / No by Time Horizon")
-            ratings=horizon_ratings(x,fundamental_score,intraday_df)
-            rcols=st.columns(4)
-            for rc,(horizon,rating,rcls,notes) in zip(rcols,ratings):
-                with rc:
-                    note_text=" · ".join(notes[:3]) if notes else "No confirmation"
-                    st.markdown('<div class="rating-card">'+f'<span>{horizon}</span>'+f'<b class="{rcls}">{rating}</b>'+f'<small>{html.escape(note_text)}</small>'+'</div>',unsafe_allow_html=True)
+    elif section=="Ratios":
+        rv=[("P/E",PA_val(info,"trailingPE")),("Forward P/E",PA_val(info,"forwardPE")),("P/B",PA_val(info,"priceToBook")),("EV/EBITDA",PA_val(info,"enterpriseToEbitda")),("PEG",PA_val(info,"pegRatio")),("Profit Margin",PA_pct(PA_val(info,"profitMargins"))),("Operating Margin",PA_pct(PA_val(info,"operatingMargins"))),("Gross Margin",PA_pct(PA_val(info,"grossMargins"))),("ROE",PA_pct(PA_val(info,"returnOnEquity"))),("ROA",PA_pct(PA_val(info,"returnOnAssets"))),("Current Ratio",PA_val(info,"currentRatio")),("Quick Ratio",PA_val(info,"quickRatio")),("Debt/Equity",PA_val(info,"debtToEquity")),("Revenue Growth",PA_pct(PA_val(info,"revenueGrowth"))),("Earnings Growth",PA_pct(PA_val(info,"earningsGrowth")))]
+        st.dataframe(pd.DataFrame(rv,columns=["Ratio","Value"]),use_container_width=True,hide_index=True)
 
-            st.caption("BUY / HOLD / NO is a rule-based signal from available market and fundamental data, not a guarantee or personalized investment recommendation.")
-            atr=float(x.ATR14.iloc[-1]);stop=latest-1.5*atr;risk=latest-stop;t1=latest+1.5*risk;t2=latest+3*risk
-            st.markdown("### 🛡️ Trade Execution & Risk")
-            cs=st.columns(5)
-            for col,v in zip(cs,[("ENTRY",latest),("STOP LOSS",stop),("TARGET 1",t1),("TARGET 2",t2),("R:R","1 : 3.0")]):
-                with col:st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{("₹"+format(v[1],",.2f")) if isinstance(v[1],float) else v[1]}</b></div>',unsafe_allow_html=True)
+    elif section=="Investors":
+        st.markdown("### Shareholding Pattern")
+        with st.spinner("Loading NSE shareholding only now..."):sh=PA_nse_shareholding(symbol)
+        if not sh.empty:
+            latest=sh.iloc[-1];previous=sh.iloc[-2] if len(sh)>1 else None;boxes=st.columns(4)
+            for box,col in zip(boxes,["FII","DII","Promoters","Public"]):
+                v=latest.get(col);delta=None
+                if previous is not None and pd.notna(v) and pd.notna(previous.get(col)):delta=f"{float(v)-float(previous.get(col)):+.2f} pp"
+                box.metric(col,f"{float(v):.2f}%" if pd.notna(v) else "N/A",delta)
+            use=[c for c in ["Promoters","FII","DII","Government","Public","Others","Shareholders"] if c in sh and sh[c].notna().any()]
+            table=sh.set_index("Period")[use].T;st.dataframe(table,use_container_width=True)
+            st.caption("Source: NSE corporate shareholding-pattern feed.")
+        else:
+            st.warning("NSE quarterly shareholding is unavailable. Loading Yahoo holder fallback...")
+            major,inst=PA_holders(ticker)
+            ih=PA_num(PA_val(info,"heldPercentInstitutions"));insider=PA_num(PA_val(info,"heldPercentInsiders"));x1,x2=st.columns(2);x1.metric("Institutions",PA_pct(ih));x2.metric("Insiders",PA_pct(insider))
+            if not inst.empty:st.dataframe(inst,use_container_width=True,hide_index=True)
+            if not major.empty:st.dataframe(major,use_container_width=True)
 
-            render_company_overview(sym,finfo)
+    elif section=="News":
+        st.markdown("### Latest company news")
+        with st.spinner("Loading company news..."):news=PA_company_news(ticker)
+        if not news:st.info("No recent news returned by the current provider.")
+        for n in news[:15]:
+            c=n.get("content",n) if isinstance(n,dict) else {};title=c.get("title") or n.get("title","News");summary=c.get("summary") or "";provider=(c.get("provider") or {}).get("displayName","") if isinstance(c.get("provider"),dict) else ""
+            st.markdown(f"**{title}**");st.caption(provider) if provider else None;st.write(summary) if summary else None
 
 elif page=="🚀 Swing Screeners":
     st.markdown("## 🚀 Famous Swing-Trading Screener Library")
@@ -1137,50 +1230,116 @@ elif page=="🚀 Swing Screeners":
 
 
 elif page=="📰 Stock News":
-    st.markdown("## 📰 Stock News & Event Radar")
-    st.caption("Search stock-specific news for results, buybacks, corporate actions, price moves and company events.")
-    c1,c2,c3=st.columns([1.2,1,1])
-    with c1: q=st.text_input("Stock / company / topic",value="TBZ")
-    with c2: mode=st.selectbox("News type",["All","Results","Buyback","Corporate Action","Positive Move","Negative Move"])
-    with c3: count=st.selectbox("Articles",[10,20,30],index=1)
+    st.markdown("<div class='hero'><div class='eyebrow'>FRESH CATALYST RADAR</div><h1>📰 Stock News & Event Radar</h1><p>Fresh Indian stock-market catalysts, newest first. General scan works even when the stock box is empty.</p></div>",unsafe_allow_html=True)
 
-    if st.button("⚡ Load Latest News",type="primary"):
-        with st.spinner("Fetching latest news..."):
-            rows=google_news_rss(q+" stock India NSE",count)
-        outrows=[]
-        for n in rows:
-            n=n.copy(); n["type"]=classify_news(n["title"])
-            if mode=="All" or n["type"]==mode: outrows.append(n)
-        st.session_state["news_rows"]=outrows
+    @st.cache_data(ttl=180,show_spinner=False)
+    def NEWS_rss(query,limit=100):
+        import urllib.parse, xml.etree.ElementTree as ET
+        from email.utils import parsedate_to_datetime
+        from datetime import timezone
+        url="https://news.google.com/rss/search?q="+urllib.parse.quote_plus(query)+"&hl=en-IN&gl=IN&ceid=IN:en"
+        out=[]
+        try:
+            r=requests.get(url,timeout=15,headers={"User-Agent":"Mozilla/5.0"})
+            root=ET.fromstring(r.content)
+            for it in root.findall(".//item")[:limit]:
+                pub=it.findtext("pubDate") or ""
+                try:
+                    dt=parsedate_to_datetime(pub)
+                    if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
+                    dt=dt.astimezone(timezone.utc)
+                except:continue
+                sn=it.find("source")
+                out.append({"title":(it.findtext("title") or "").strip(),"link":(it.findtext("link") or "").strip(),
+                            "source":((sn.text or "").strip() if sn is not None else "News"),"dt":dt})
+        except Exception:pass
+        return out
 
-    rows=st.session_state.get("news_rows",[])
-    if rows:
-        st.markdown(f"### Latest matching stories ({len(rows)})")
-        for n in rows:
-            card = (
-                '<div class="news-card">'
-                + '<span class="news-tag">'+html.escape(n["type"])+'</span>'
-                + '<div class="news-meta">'+html.escape(n["source"])+' | '+html.escape(n["published"])+'</div>'
-                + '<h4>'+html.escape(n["title"])+'</h4>'
-                + '<p>'+html.escape(n["description"][:260])+'</p>'
-                + '<a href="'+n["link"]+'" target="_blank">Open article ↗</a>'
-                + '</div>'
-            )
-            st.markdown(card,unsafe_allow_html=True)
+    def NEWS_tag(title):
+        x=title.lower()
+        rules=[
+          ("🔴 Block/Bulk Deal",["block deal","bulk deal","stake sale","stake sell","offload"]),
+          ("🟢 Order Win",["bags order","wins order","order win","receives order","contract win","letter of award","letter of acceptance"]),
+          ("🟢 Government/Regulatory",["government approval","government approves","cabinet approval","cabinet approves","ministry approval","regulatory approval","sebi approval","rbi approval","dcgi approval"]),
+          ("🟢 Corporate Action",["buyback","bonus issue","stock split","dividend","rights issue"]),
+          ("🟣 Results",["quarterly results","q1 results","q2 results","q3 results","q4 results","profit rises","profit jumps","profit falls"]),
+          ("🟡 M&A / Stake",["acquisition","acquires","merger","demerger","buys stake","stake purchase","mou"]),
+          ("🔵 Brokerage",["brokerage","target price","jefferies","motilal oswal","nomura","ubs","goldman sachs","morgan stanley","upgrade","downgrade"]),
+          ("⚠️ Legal/Negative",["penalty","fraud","probe","investigation","insolvency","default","court order","restriction"]),
+        ]
+        for lab,keys in rules:
+            if any(k in x for k in keys):return lab
+        return "📰 Market/Company News"
 
-    st.markdown("### Quick event searches")
-    qcols=st.columns(4)
-    quick=[("TBZ / GRT Buyback","TBZ GRT buyback stock India"),
-           ("Quarterly Results","Q1 results India stocks profit revenue"),
-           ("PVR INOX","PVR INOX shares fall reason"),
-           ("Milky Mist","Milky Mist Q1 results")]
-    for col,(label,qq) in zip(qcols,quick):
-        with col:
-            if st.button(label,use_container_width=True,key="news_"+label):
-                with st.spinner("Fetching..."):
-                    st.session_state["news_rows"]=[dict(x,type=classify_news(x["title"])) for x in google_news_rss(qq,20)]
-                st.rerun()
+    def NEWS_age(dt):
+        from datetime import datetime,timezone
+        sec=max(0,(datetime.now(timezone.utc)-dt).total_seconds())
+        if sec<3600:return f"{max(1,int(sec//60))} min ago"
+        if sec<86400:return f"{int(sec//3600)} hr ago"
+        return f"{int(sec//86400)} day(s) ago"
 
+    def NEWS_hint(tag,title):
+        x=title.lower()
+        if "block/bulk" in tag:return "Watch supply, buyer/seller identity and deal price"
+        if "order win" in tag:return "Potential business catalyst; compare order size with revenue"
+        if "government" in tag:return "Regulatory/policy catalyst; verify effective date and conditions"
+        if "corporate action" in tag:return "Corporate-action catalyst; check record/ex-date and terms"
+        if "legal" in tag:return "Risk event; verify financial/material impact"
+        if "downgrade" in x or "profit falls" in x:return "Potential negative catalyst"
+        if "upgrade" in x or "profit jumps" in x:return "Potential positive catalyst"
+        return "Read details before judging price impact"
+
+    q1,q2,q3=st.columns([1.4,1,0.7])
+    with q1: term=st.text_input("Stock / company / topic","",placeholder="Leave blank for all-market latest news")
+    with q2: kind=st.selectbox("News type",["All","Block/Bulk Deals","Order Wins","Government/Regulatory","Results","Corporate Actions","Brokerage","M&A / Stake","Legal/Negative"])
+    with q3: fresh=st.selectbox("Freshness",["Today / 24 Hours","3 Days","7 Days"],index=1)
+    count=st.slider("Articles",10,60,30,10)
+
+    from datetime import datetime,timezone,timedelta
+    age_limit={"Today / 24 Hours":timedelta(hours=24),"3 Days":timedelta(days=3),"7 Days":timedelta(days=7)}[fresh]
+    cutoff=datetime.now(timezone.utc)-age_limit
+
+    # IMPORTANT: do not require all publisher names in one query. Run several broad feeds and merge.
+    when={"Today / 24 Hours":"when:1d","3 Days":"when:3d","7 Days":"when:7d"}[fresh]
+    base=(term.strip()+" NSE stock ") if term.strip() else "India NSE stocks "
+    queries=[
+        base+f"(block deal OR bulk deal OR order OR contract OR approval OR acquisition OR buyback OR dividend OR results) {when}",
+        base+f"(Moneycontrol OR CNBC-TV18 OR NDTV Profit OR Reuters) {when}",
+        base+f'("stocks to watch" OR "stock in focus" OR "market moving") {when}',
+    ]
+    all_items=[]
+    with st.spinner("Loading fresh market catalysts..."):
+        for qq in queries:all_items.extend(NEWS_rss(qq,100))
+
+    # Merge, hard-filter dates locally, dedupe, newest first.
+    seen=set(); items=[]
+    for z in sorted(all_items,key=lambda a:a["dt"],reverse=True):
+        if z["dt"]<cutoff:continue
+        key=re.sub(r"[^a-z0-9]+"," ",z["title"].lower()).strip()
+        if key in seen:continue
+        seen.add(key)
+        tag=NEWS_tag(z["title"])
+        filters={"Block/Bulk Deals":"Block/Bulk","Order Wins":"Order Win","Government/Regulatory":"Government",
+                 "Results":"Results","Corporate Actions":"Corporate Action","Brokerage":"Brokerage","M&A / Stake":"M&A","Legal/Negative":"Legal"}
+        if kind!="All" and filters[kind].lower() not in tag.lower():continue
+        z["tag"]=tag;items.append(z)
+        if len(items)>=count:break
+
+    st.markdown(f"### Latest market-moving news · {len(items)} headlines")
+    st.caption(f"Showing only items published inside the selected {fresh} window, newest first. Event hints are not price predictions.")
+    if not items:
+        st.warning("No matching headlines were found for this exact filter. Try All or 7 Days. The page no longer shows old articles just to fill the list.")
+    for z in items:
+        title=z["title"].replace("<","&lt;").replace(">","&gt;")
+        hint=NEWS_hint(z["tag"],z["title"])
+        st.markdown(f"""<div style="border:1px solid rgba(120,160,210,.28);border-radius:14px;padding:14px 16px;margin:9px 0;background:rgba(15,42,72,.38)">
+        <div style="font-size:12px;font-weight:800">{z['tag']} &nbsp; • &nbsp; {hint}</div>
+        <div style="font-size:17px;font-weight:800;line-height:1.35;margin-top:5px">{title}</div>
+        <div style="opacity:.72;font-size:13px;margin-top:6px">{z['source']} &nbsp; • &nbsp; {NEWS_age(z['dt'])}</div>
+        <div style="margin-top:8px"><a href="{z['link']}" target="_blank">Open full story ↗</a></div></div>""",unsafe_allow_html=True)
+
+    st.markdown("### What this radar is meant to catch")
+    st.write("Block/bulk deals • large order wins • government/regulatory approvals • results • buybacks/dividends • acquisitions • brokerage actions • material company events")
 elif page=="🎯 Brokerage Calls":
     st.markdown("## 🎯 Brokerage Calls & Target Tracker")
     st.caption("Tracks public brokerage-call headlines, target prices when detectable, current price and return since the call date.")
