@@ -898,37 +898,73 @@ if page=="🏠 Dashboard":
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
 elif page=="🔥 Market Heatmap":
-    st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. View NIFTY 50, 100, 200 or a wider NSE stock set.</p></div>",unsafe_allow_html=True)
-    universe_name=st.selectbox("Stock universe",["NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500"],key="heat_stock_universe")
-    if st.button("↻ Refresh",key="heat_stock_refresh"):
-        st.cache_data.clear(); st.rerun()
+    st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. Review an index group or the full NSE equity universe.</p></div>",unsafe_allow_html=True)
+
+    f1,f2,f3=st.columns([2,2,1])
+    with f1:
+        universe_name=st.selectbox("Stocks",["ALL NSE","NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500"],index=0,key="heat_stock_universe")
+    with f2:
+        sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
+    with f3:
+        if st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh"):
+            st.cache_data.clear(); st.rerun()
+
+    move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
 
     nifty50=["ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO","BAJFINANCE","BAJAJFINSV","BEL","BHARTIARTL","CIPLA","COALINDIA","DRREDDY","EICHERMOT","ETERNAL","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK","INFY","ITC","JIOFIN","JSWSTEEL","KOTAKBANK","LT","M&M","MARUTI","NESTLEIND","NTPC","ONGC","POWERGRID","RELIANCE","SBILIFE","SBIN","SHRIRAMFIN","SUNPHARMA","TATACONSUM","TATAMOTORS","TATASTEEL","TCS","TECHM","TITAN","TRENT","ULTRACEMCO","WIPRO"]
-    target={"NIFTY 50":50,"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
-    syms=nifty50 if target==50 else (nifty50+[s for s in universe() if s not in nifty50])[:target]
+
+    all_syms=list(dict.fromkeys(universe()))
+    if universe_name=="ALL NSE":
+        syms=all_syms
+    else:
+        target={"NIFTY 50":50,"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
+        syms=(nifty50+[s for s in all_syms if s not in nifty50])[:target]
 
     @st.cache_data(ttl=300,show_spinner=False)
     def stock_heat_prices(symbols):
         result=[]
         for k in range(0,len(symbols),100):
             batch=symbols[k:k+100]; tick=[s+".NS" for s in batch]
-            try: data=yf.download(tick,period="5d",interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
-            except Exception: continue
+            try:
+                data=yf.download(tick,period="5d",interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
+            except Exception:
+                continue
             for s,t in zip(batch,tick):
                 try:
                     d=data if len(batch)==1 else data[t]
                     c=d["Close"].dropna()
                     if len(c)<1: continue
                     last=float(c.iloc[-1]); prev=float(c.iloc[-2]) if len(c)>1 else last
-                    result.append((s,last,last-prev,(last-prev)/prev*100 if prev else 0))
-                except Exception: pass
+                    ch=last-prev; pct=(ch/prev*100) if prev else 0
+                    result.append((s,last,ch,pct))
+                except Exception:
+                    pass
         return result
 
-    rows=stock_heat_prices(syms)
-    if not rows: st.warning("Stock data unavailable. Press Refresh.")
+    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks..."):
+        rows=stock_heat_prices(syms)
+
+    if not rows:
+        st.warning("Stock data unavailable. Press Refresh.")
     else:
-        up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows)
-        m=st.columns(4); m[0].metric("Stocks",len(rows));m[1].metric("🟢 Up",up);m[2].metric("🔴 Down",down);m[3].metric("⚪ Flat",len(rows)-up-down)
+        up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows); flat=len(rows)-up-down
+        m=st.columns(4)
+        m[0].metric("Stocks loaded",len(rows));m[1].metric("🟢 Up",up);m[2].metric("🔴 Down",down);m[3].metric("⚪ Flat",flat)
+
+        if move_filter=="🟢 Gainers": rows=[x for x in rows if x[3]>0]
+        elif move_filter=="🔴 Losers": rows=[x for x in rows if x[3]<0]
+        elif move_filter=="⚪ Unchanged": rows=[x for x in rows if x[3]==0]
+
+        if sort_mode=="🟢 Green first → 🔴 Red last":
+            rows=sorted(rows,key=lambda x:(x[3]<=0,-x[3] if x[3]>0 else x[3]))
+            gainers=sorted([x for x in rows if x[3]>0],key=lambda x:x[3],reverse=True)
+            flatrows=[x for x in rows if x[3]==0]
+            losers=sorted([x for x in rows if x[3]<0],key=lambda x:x[3],reverse=True)
+            rows=gainers+flatrows+losers
+        elif sort_mode=="🚀 Highest % first": rows=sorted(rows,key=lambda x:x[3],reverse=True)
+        elif sort_mode=="🔻 Lowest % first": rows=sorted(rows,key=lambda x:x[3])
+        else: rows=sorted(rows,key=lambda x:x[0])
+
         def hc(x):
             if x>=5:return "#04783d"
             if x>=2:return "#0b9f50"
@@ -937,19 +973,12 @@ elif page=="🔥 Market Heatmap":
             if x<=-2:return "#d7273b"
             if x<0:return "#ef7a86"
             return "#64748b"
+
         cards=[]
         for s,last,ch,pct in rows:
             cards.append(f"<div class='nse-heat-card' style='background:{hc(pct)};min-height:82px'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div>")
-        st.caption(f"{universe_name} individual-stock heatmap · latest close and daily change")
+        st.caption(f"{universe_name} · {len(rows):,} displayed · latest close and daily change")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
-        ranked=sorted(rows,key=lambda x:x[3],reverse=True)
-        l,r=st.columns(2)
-        with l:
-            st.markdown("### 🟢 Top gainers")
-            for s,last,ch,pct in ranked[:10]: st.write(f"**{s}** · {pct:+.2f}%")
-        with r:
-            st.markdown("### 🔴 Top losers")
-            for s,last,ch,pct in ranked[-10:][::-1]: st.write(f"**{s}** · {pct:+.2f}%")
 
 elif page=="🧠 Pro Analyzer":
     syms=universe()
