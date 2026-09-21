@@ -1412,50 +1412,116 @@ elif page=="🚀 Swing Screeners":
 
 
 elif page=="📰 Stock News":
-    st.markdown("## 📰 Stock News & Event Radar")
-    st.caption("Search stock-specific news for results, buybacks, corporate actions, price moves and company events.")
-    c1,c2,c3=st.columns([1.2,1,1])
-    with c1: q=st.text_input("Stock / company / topic",value="TBZ")
-    with c2: mode=st.selectbox("News type",["All","Results","Buyback","Corporate Action","Positive Move","Negative Move"])
-    with c3: count=st.selectbox("Articles",[10,20,30],index=1)
+    st.markdown("<div class='hero'><div class='eyebrow'>LIVE CATALYST FEED</div><h1>📰 Stock News & Event Radar</h1><p>Latest stock-moving headlines with source, age, catalyst type and likely market relevance.</p></div>",unsafe_allow_html=True)
 
-    if st.button("⚡ Load Latest News",type="primary"):
-        with st.spinner("Fetching latest news..."):
-            rows=google_news_rss(q+" stock India NSE",count)
-        outrows=[]
-        for n in rows:
-            n=n.copy(); n["type"]=classify_news(n["title"])
-            if mode=="All" or n["type"]==mode: outrows.append(n)
-        st.session_state["news_rows"]=outrows
+    @st.cache_data(ttl=300,show_spinner=False)
+    def NEWS_feed(query,max_items=60):
+        import urllib.parse, xml.etree.ElementTree as ET
+        q=urllib.parse.quote_plus(query)
+        url=f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
+        rows=[]
+        try:
+            rr=requests.get(url,timeout=12,headers={"User-Agent":"Mozilla/5.0"})
+            root=ET.fromstring(rr.content)
+            for it in root.findall(".//item")[:max_items]:
+                title=(it.findtext("title") or "").strip()
+                link=(it.findtext("link") or "").strip()
+                pub=(it.findtext("pubDate") or "").strip()
+                source=""
+                sn=it.find("source")
+                if sn is not None:source=(sn.text or "").strip()
+                rows.append({"title":title,"link":link,"published":pub,"source":source})
+        except Exception:pass
+        return rows
 
-    rows=st.session_state.get("news_rows",[])
-    if rows:
-        st.markdown(f"### Latest matching stories ({len(rows)})")
-        for n in rows:
-            card = (
-                '<div class="news-card">'
-                + '<span class="news-tag">'+html.escape(n["type"])+'</span>'
-                + '<div class="news-meta">'+html.escape(n["source"])+' | '+html.escape(n["published"])+'</div>'
-                + '<h4>'+html.escape(n["title"])+'</h4>'
-                + '<p>'+html.escape(n["description"][:260])+'</p>'
-                + '<a href="'+n["link"]+'" target="_blank">Open article ↗</a>'
-                + '</div>'
-            )
-            st.markdown(card,unsafe_allow_html=True)
+    def NEWS_age(pub):
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        try:
+            dt=parsedate_to_datetime(pub)
+            if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
+            sec=max(0,(datetime.now(timezone.utc)-dt.astimezone(timezone.utc)).total_seconds())
+            if sec<3600:return f"{max(1,int(sec//60))} min ago"
+            if sec<86400:return f"{int(sec//3600)} hr ago"
+            d=int(sec//86400)
+            return f"{d} day{'s' if d!=1 else ''} ago"
+        except:return ""
+
+    def NEWS_tag(t):
+        x=t.lower()
+        rules=[
+          ("🔴 Block/Bulk Deal",["block deal","bulk deal","stake sale","stake sold","offload","large deal"]),
+          ("🟢 Government/Regulatory",["government approves","government approval","cabinet approves","ministry approves","regulatory approval","sebi approval","rbi approval","dcgi approval","nod from"]),
+          ("🟢 Order Win",["wins order","bags order","order win","receives order","contract worth","awarded contract","letter of award","loa"]),
+          ("🟢 Corporate Action",["buyback","bonus issue","stock split","dividend","rights issue"]),
+          ("🟣 Results",["quarter results","quarterly results","q1","q2","q3","q4","profit rises","profit jumps","profit falls","revenue rises"]),
+          ("🟠 Fund Raise",["fundraise","fund raise","raises rs","qip","preferential issue","debenture"]),
+          ("🔵 Brokerage",["target price","brokerage","jefferies","motilal oswal","nomura","ubs","goldman sachs","morgan stanley","maintains buy","downgrade","upgrade"]),
+          ("🟡 M&A / Stake",["acquisition","acquires","merger","demerger","stake purchase","buys stake","mou"]),
+          ("⚠️ Legal/Negative",["court","penalty","fine","fraud","probe","investigation","insolvency","default","restriction"]),
+        ]
+        for lab,keys in rules:
+            if any(k in x for k in keys):return lab
+        return "📰 Company News"
+
+    def NEWS_bias(tag,title):
+        x=title.lower()
+        if tag.startswith("🔴"):return "Potential supply/volatility"
+        if tag.startswith("🟢") and ("order" in tag.lower() or "government" in tag.lower()):return "Potential positive catalyst"
+        if tag.startswith("⚠️"):return "Potential negative catalyst"
+        if "downgrade" in x or "profit falls" in x:return "Potential negative catalyst"
+        if "upgrade" in x or "maintains buy" in x:return "Potential positive catalyst"
+        return "Impact depends on details"
+
+    c1,c2,c3=st.columns([1.35,1,0.65])
+    with c1: nq=st.text_input("Stock / company / topic","",placeholder="e.g. Lenskart, RELIANCE, block deal")
+    with c2: ntype=st.selectbox("News type",["All","Block/Bulk Deals","Government/Regulatory","Order Wins","Results","Corporate Actions","Brokerage","M&A / Stake","Legal/Negative"])
+    with c3: hours=st.selectbox("Freshness",["24 Hours","3 Days","7 Days","30 Days"],index=1)
+    nmax=st.slider("Articles",10,60,30,10)
+
+    source_query='(Moneycontrol OR "NDTV Profit" OR CNBC-TV18 OR "Economic Times" OR BusinessLine OR Reuters OR "Business Standard")'
+    if nq.strip():
+        query=f'{nq.strip()} stock NSE {source_query}'
+    else:
+        query=f'India stocks NSE (block deal OR order win OR government approval OR results OR buyback OR acquisition OR brokerage) {source_query}'
+    daymap={"24 Hours":"when:1d","3 Days":"when:3d","7 Days":"when:7d","30 Days":"when:30d"}
+    query+=" "+daymap[hours]
+
+    if st.button("⚡ Load Latest News",use_container_width=False) or True:
+        with st.spinner("Scanning latest market headlines..."):
+            items=NEWS_feed(query,nmax*2)
+
+        def keep_type(tag):
+            mp={"Block/Bulk Deals":"Block/Bulk","Government/Regulatory":"Government","Order Wins":"Order Win",
+                "Results":"Results","Corporate Actions":"Corporate Action","Brokerage":"Brokerage",
+                "M&A / Stake":"M&A","Legal/Negative":"Legal"}
+            return ntype=="All" or mp[ntype].lower() in tag.lower()
+
+        enriched=[]
+        for z in items:
+            tag=NEWS_tag(z["title"])
+            if keep_type(tag):
+                z=dict(z);z["tag"]=tag;z["age"]=NEWS_age(z["published"]);z["bias"]=NEWS_bias(tag,z["title"]);enriched.append(z)
+            if len(enriched)>=nmax:break
+
+        if not enriched:
+            st.info("No matching fresh headlines were returned. Try All news types or a wider freshness range.")
+        else:
+            st.markdown(f"### Latest market-moving news · {len(enriched)} headlines")
+            st.caption("Potential impact labels are event-type hints, not predictions. Open the source and verify the full announcement before trading.")
+            for z in enriched:
+                source=z["source"] or "News source"
+                safe_title=z["title"].replace("<","&lt;").replace(">","&gt;")
+                st.markdown(
+                    f"""<div style="border:1px solid rgba(120,160,210,.28);border-radius:14px;padding:14px 16px;margin:9px 0;background:rgba(15,42,72,.38)">
+                    <div style="font-size:12px;font-weight:800;margin-bottom:5px">{z['tag']} &nbsp; • &nbsp; {z['bias']}</div>
+                    <div style="font-size:17px;font-weight:800;line-height:1.35">{safe_title}</div>
+                    <div style="opacity:.72;font-size:13px;margin-top:6px">{source} &nbsp; • &nbsp; {z['age']}</div>
+                    <div style="margin-top:8px"><a href="{z['link']}" target="_blank">Open full story ↗</a></div>
+                    </div>""",unsafe_allow_html=True)
 
     st.markdown("### Quick event searches")
-    qcols=st.columns(4)
-    quick=[("TBZ / GRT Buyback","TBZ GRT buyback stock India"),
-           ("Quarterly Results","Q1 results India stocks profit revenue"),
-           ("PVR INOX","PVR INOX shares fall reason"),
-           ("Milky Mist","Milky Mist Q1 results")]
-    for col,(label,qq) in zip(qcols,quick):
-        with col:
-            if st.button(label,use_container_width=True,key="news_"+label):
-                with st.spinner("Fetching..."):
-                    st.session_state["news_rows"]=[dict(x,type=classify_news(x["title"])) for x in google_news_rss(qq,20)]
-                st.rerun()
-
+    st.caption("Use the filters above for block deals, government/regulatory approvals, orders, results, corporate actions and brokerage events.")
 elif page=="🎯 Brokerage Calls":
     st.markdown("## 🎯 Brokerage Calls & Target Tracker")
     st.caption("Tracks public brokerage-call headlines, target prices when detectable, current price and return since the call date.")
