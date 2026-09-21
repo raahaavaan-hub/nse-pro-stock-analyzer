@@ -971,7 +971,8 @@ elif page=="🔥 Market Heatmap":
         sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
     with f4:
         if st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh"):
-            st.cache_data.clear(); st.rerun()
+            stock_heat_prices.clear() if "stock_heat_prices" in globals() else None
+            st.rerun()
 
     move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
 
@@ -1024,17 +1025,21 @@ elif page=="🔥 Market Heatmap":
                     except Exception:
                         pass
 
-        # Retry missing stocks one-by-one. This prevents a partial Yahoo batch
-        # response from turning NIFTY 50 into only 20/42 visible tiles.
+        # One retry batch for missing symbols. Avoid slow one-by-one network calls.
         missing=[s for s in symbols if s not in loaded]
-        for s in missing:
+        if missing and len(symbols)<=200:
+            ticks=[s+".NS" for s in missing]
             try:
-                d=yf.download(s+".NS",period=yf_period,interval="1d",auto_adjust=False,progress=False,threads=False)
-                if isinstance(d.columns,pd.MultiIndex):
-                    d.columns=[c[0] for c in d.columns]
-                add_row(s,d["Close"])
+                data=yf.download(ticks,period=yf_period,interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
             except Exception:
-                pass
+                data=None
+            if data is not None and not data.empty:
+                for s,t in zip(missing,ticks):
+                    try:
+                        d=data if len(missing)==1 else data[t]
+                        add_row(s,d["Close"])
+                    except Exception:
+                        pass
 
         order={s:i for i,s in enumerate(symbols)}
         return sorted(result,key=lambda x:order.get(x[0],999999))
@@ -1084,9 +1089,8 @@ elif page=="🔥 Market Heatmap":
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
 elif page=="🧠 Pro Analyzer":
-    st.markdown("<div class='hero'><div class='eyebrow'>COMPLETE STOCK RESEARCH</div><h1>🧠 Pro Analyzer</h1><p>Fundamentals + financial statements + ownership + technicals + swing setup in one page.</p></div>",unsafe_allow_html=True)
+    st.markdown("<div class='hero'><div class='eyebrow'>FAST STOCK RESEARCH</div><h1>🧠 Pro Analyzer</h1><p>Fast first load. Heavy financial statements, investors, peers and news load only when you open that section.</p></div>",unsafe_allow_html=True)
 
-    # Heatmap deep-link preloads this key before sidebar widgets are created.
     _default_symbol=str(st.session_state.get("analyzer_symbol","RELIANCE")).replace(".NS","").upper()
     _all_symbols=list(dict.fromkeys(universe()))
     if _default_symbol not in _all_symbols:_all_symbols=[_default_symbol]+_all_symbols
@@ -1096,28 +1100,55 @@ elif page=="🧠 Pro Analyzer":
         symbol=st.selectbox("NSE stock",_all_symbols,index=_all_symbols.index(_default_symbol),key="pro_analyzer_stock")
     with pa2:
         st.write("")
-        analyze=st.button("🔎 Analyze",use_container_width=True,key="pro_analyze_btn")
+        if st.button("↻ Refresh stock",use_container_width=True,key="pro_analyze_btn"):
+            PA_basic.clear(); PA_statements.clear(); PA_holders.clear(); PA_chart.clear(); st.rerun()
     ticker=symbol+".NS"
 
-    @st.cache_data(ttl=900,show_spinner=False)
-    def PA_bundle(t):
+    @st.cache_data(ttl=1800,show_spinner=False)
+    def PA_basic(t):
+        """Only the data needed for header/overview/analysis. Keeps first load light."""
         tk=yf.Ticker(t)
         try: info=tk.info or {}
         except Exception: info={}
-        try: hist=tk.history(period="5y",auto_adjust=False)
+        try: hist=tk.history(period="1y",auto_adjust=False)
         except Exception: hist=pd.DataFrame()
-        def safe_df(attr):
+        return info,hist
+
+    @st.cache_data(ttl=3600,show_spinner=False)
+    def PA_chart(t,period):
+        try:return yf.Ticker(t).history(period=period,auto_adjust=False)
+        except Exception:return pd.DataFrame()
+
+    @st.cache_data(ttl=21600,show_spinner=False)
+    def PA_statements(t):
+        """Heavy statements are fetched only when a financial-statement section is selected."""
+        tk=yf.Ticker(t)
+        def safe(attr):
             try:
                 x=getattr(tk,attr)
                 return x if isinstance(x,pd.DataFrame) else pd.DataFrame()
             except Exception:return pd.DataFrame()
-        return info,hist,safe_df("quarterly_financials"),safe_df("financials"),safe_df("quarterly_balance_sheet"),safe_df("balance_sheet"),safe_df("quarterly_cashflow"),safe_df("cashflow"),safe_df("major_holders"),safe_df("institutional_holders")
+        return safe("quarterly_financials"),safe("financials"),safe("balance_sheet"),safe("cashflow")
+
+    @st.cache_data(ttl=21600,show_spinner=False)
+    def PA_holders(t):
+        tk=yf.Ticker(t)
+        def safe(attr):
+            try:
+                x=getattr(tk,attr)
+                return x if isinstance(x,pd.DataFrame) else pd.DataFrame()
+            except Exception:return pd.DataFrame()
+        return safe("major_holders"),safe("institutional_holders")
+
+    @st.cache_data(ttl=1800,show_spinner=False)
+    def PA_company_news(t):
+        try:return yf.Ticker(t).news or []
+        except Exception:return []
 
     def PA_num(x):
         try:
             if x is None:return None
-            v=float(x)
-            return v if pd.notna(v) else None
+            v=float(x); return v if pd.notna(v) else None
         except:return None
 
     def PA_money(x):
@@ -1144,13 +1175,9 @@ elif page=="🧠 Pro Analyzer":
     def PA_statement(df,title):
         st.markdown(f"### {title}")
         if df is None or df.empty:
-            st.info("Statement data is not available from the current market-data provider.")
-            return
-        x=df.copy()
-        x.columns=[c.strftime("%b %Y") if hasattr(c,"strftime") else str(c) for c in x.columns]
-        wanted=["Total Revenue","Operating Revenue","Gross Profit","Operating Income","EBIT","EBITDA","Pretax Income","Net Income","Basic EPS",
-                "Total Assets","Current Assets","Cash Cash Equivalents And Short Term Investments","Total Liabilities Net Minority Interest","Current Liabilities","Stockholders Equity","Total Debt","Net Debt",
-                "Operating Cash Flow","Investing Cash Flow","Financing Cash Flow","Free Cash Flow","Capital Expenditure"]
+            st.info("Statement data is not available from the current market-data provider."); return
+        x=df.copy(); x.columns=[c.strftime("%b %Y") if hasattr(c,"strftime") else str(c) for c in x.columns]
+        wanted=["Total Revenue","Operating Revenue","Gross Profit","Operating Income","EBIT","EBITDA","Pretax Income","Net Income","Basic EPS","Total Assets","Current Assets","Cash Cash Equivalents And Short Term Investments","Total Liabilities Net Minority Interest","Current Liabilities","Stockholders Equity","Total Debt","Net Debt","Operating Cash Flow","Investing Cash Flow","Financing Cash Flow","Free Cash Flow","Capital Expenditure"]
         keep=[i for i in wanted if i in x.index]
         if keep:x=x.loc[keep]
         x=x.iloc[:,:6]
@@ -1162,8 +1189,8 @@ elif page=="🧠 Pro Analyzer":
             except:return str(v)
         st.dataframe(x.map(fmt) if hasattr(x,"map") else x.applymap(fmt),use_container_width=True)
 
-    with st.spinner(f"Loading complete research for {symbol}..."):
-        info,hist,qpl,apl,qbs,abs_,qcf,acf,major,inst=PA_bundle(ticker)
+    with st.spinner(f"Loading {symbol} overview..."):
+        info,hist=PA_basic(ticker)
 
     last=PA_num(PA_val(info,"currentPrice","regularMarketPrice"))
     if last is None and not hist.empty:last=float(hist["Close"].dropna().iloc[-1])
@@ -1171,186 +1198,97 @@ elif page=="🧠 Pro Analyzer":
     change=(last-prev) if last is not None and prev else None
     pct=(change/prev*100) if change is not None and prev else None
     name=PA_val(info,"longName","shortName") or symbol
-
     st.markdown(f"## {name}  ·  NSE: {symbol}")
     if last is not None:
         st.markdown(f"### ₹{last:,.2f} &nbsp; <span style='color:{'#22c55e' if (pct or 0)>=0 else '#ef4444'}'>{pct:+.2f}%</span>" if pct is not None else f"### ₹{last:,.2f}",unsafe_allow_html=True)
 
-    tabs=st.tabs(["Overview","Chart","Analysis","Peers","Quarters","Profit & Loss","Balance Sheet","Cash Flow","Ratios","Investors","News"])
+    # Streamlit tabs execute every tab on every rerun. A radio makes heavy sections truly lazy.
+    section=st.radio("Research section",["Overview","Chart","Analysis","Peers","Quarters","Profit & Loss","Balance Sheet","Cash Flow","Ratios","Investors","News"],horizontal=True,key="pa_section")
 
-    with tabs[0]:
-        vals=[
-            ("Market Cap",PA_money(PA_val(info,"marketCap"))),
-            ("Current Price",PA_money(last)),
-            ("52W High / Low",f"{PA_money(PA_val(info,'fiftyTwoWeekHigh'))} / {PA_money(PA_val(info,'fiftyTwoWeekLow'))}"),
-            ("Stock P/E",f"{PA_num(PA_val(info,'trailingPE')):.2f}" if PA_num(PA_val(info,'trailingPE')) is not None else "N/A"),
-            ("Forward P/E",f"{PA_num(PA_val(info,'forwardPE')):.2f}" if PA_num(PA_val(info,'forwardPE')) is not None else "N/A"),
-            ("Book Value",PA_money(PA_val(info,"bookValue"))),
-            ("Price / Book",f"{PA_num(PA_val(info,'priceToBook')):.2f}" if PA_num(PA_val(info,'priceToBook')) is not None else "N/A"),
-            ("Dividend Yield",PA_pct(PA_val(info,"dividendYield"))),
-            ("ROE",PA_pct(PA_val(info,"returnOnEquity"))),
-            ("ROA",PA_pct(PA_val(info,"returnOnAssets"))),
-            ("Debt / Equity",f"{PA_num(PA_val(info,'debtToEquity')):.2f}" if PA_num(PA_val(info,'debtToEquity')) is not None else "N/A"),
-            ("EPS",f"₹{PA_num(PA_val(info,'trailingEps')):.2f}" if PA_num(PA_val(info,'trailingEps')) is not None else "N/A"),
-        ]
+    if section=="Overview":
+        vals=[("Market Cap",PA_money(PA_val(info,"marketCap"))),("Current Price",PA_money(last)),("52W High / Low",f"{PA_money(PA_val(info,'fiftyTwoWeekHigh'))} / {PA_money(PA_val(info,'fiftyTwoWeekLow'))}"),("Stock P/E",f"{PA_num(PA_val(info,'trailingPE')):.2f}" if PA_num(PA_val(info,'trailingPE')) is not None else "N/A"),("Forward P/E",f"{PA_num(PA_val(info,'forwardPE')):.2f}" if PA_num(PA_val(info,'forwardPE')) is not None else "N/A"),("Book Value",PA_money(PA_val(info,"bookValue"))),("Price / Book",f"{PA_num(PA_val(info,'priceToBook')):.2f}" if PA_num(PA_val(info,'priceToBook')) is not None else "N/A"),("Dividend Yield",PA_pct(PA_val(info,"dividendYield"))),("ROE",PA_pct(PA_val(info,"returnOnEquity"))),("ROA",PA_pct(PA_val(info,"returnOnAssets"))),("Debt / Equity",f"{PA_num(PA_val(info,'debtToEquity')):.2f}" if PA_num(PA_val(info,'debtToEquity')) is not None else "N/A"),("EPS",f"₹{PA_num(PA_val(info,'trailingEps')):.2f}" if PA_num(PA_val(info,'trailingEps')) is not None else "N/A")]
         for row in range(0,len(vals),4):
             cs=st.columns(4)
             for c,(lab,val) in zip(cs,vals[row:row+4]):c.metric(lab,val)
         l,r=st.columns([2,1])
-        with l:
-            st.markdown("### About")
-            st.write(PA_val(info,"longBusinessSummary") or "Company description is unavailable from the current provider.")
+        with l:st.markdown("### About");st.write(PA_val(info,"longBusinessSummary") or "Company description unavailable.")
         with r:
-            st.markdown("### Company")
-            st.write("**Sector:**",PA_val(info,"sector") or "N/A")
-            st.write("**Industry:**",PA_val(info,"industry") or "N/A")
-            st.write("**Employees:**",f"{int(PA_val(info,'fullTimeEmployees')):,}" if PA_val(info,"fullTimeEmployees") else "N/A")
-            st.write("**Website:**",PA_val(info,"website") or "N/A")
+            st.markdown("### Company");st.write("**Sector:**",PA_val(info,"sector") or "N/A");st.write("**Industry:**",PA_val(info,"industry") or "N/A");st.write("**Employees:**",f"{int(PA_val(info,'fullTimeEmployees')):,}" if PA_val(info,"fullTimeEmployees") else "N/A");st.write("**Website:**",PA_val(info,"website") or "N/A")
 
-    with tabs[1]:
+    elif section=="Chart":
         period=st.radio("Chart period",["1mo","3mo","6mo","1y","2y","5y"],index=3,horizontal=True,key="pa_chart_period")
-        try:
-            ch=yf.Ticker(ticker).history(period=period,auto_adjust=False)
-            if not ch.empty:st.line_chart(ch["Close"],use_container_width=True)
-            else:st.info("Chart data unavailable.")
-        except Exception:st.info("Chart data unavailable.")
+        with st.spinner("Loading chart..."):ch=PA_chart(ticker,period)
+        if not ch.empty:st.line_chart(ch["Close"],use_container_width=True)
+        else:st.info("Chart data unavailable.")
 
-    with tabs[2]:
+    elif section=="Analysis":
         st.markdown("### Strengths / Risks")
-        pros=[];cons=[]
-        pe=PA_num(PA_val(info,"trailingPE")); roe=PA_num(PA_val(info,"returnOnEquity")); de=PA_num(PA_val(info,"debtToEquity"))
-        gm=PA_num(PA_val(info,"grossMargins")); om=PA_num(PA_val(info,"operatingMargins")); eg=PA_num(PA_val(info,"earningsGrowth")); rg=PA_num(PA_val(info,"revenueGrowth"))
-        if roe is not None:
-            (pros if roe>=.15 else cons).append(f"Return on equity is {roe*100:.1f}%.")
-        if de is not None:
-            (pros if de<=50 else cons).append(f"Debt-to-equity reported by the provider is {de:.1f}.")
-        if rg is not None:
-            (pros if rg>0 else cons).append(f"Revenue growth is {rg*100:.1f}%.")
-        if eg is not None:
-            (pros if eg>0 else cons).append(f"Earnings growth is {eg*100:.1f}%.")
+        pros=[];cons=[];pe=PA_num(PA_val(info,"trailingPE"));roe=PA_num(PA_val(info,"returnOnEquity"));de=PA_num(PA_val(info,"debtToEquity"));om=PA_num(PA_val(info,"operatingMargins"));eg=PA_num(PA_val(info,"earningsGrowth"));rg=PA_num(PA_val(info,"revenueGrowth"))
+        if roe is not None:(pros if roe>=.15 else cons).append(f"Return on equity is {roe*100:.1f}%.")
+        if de is not None:(pros if de<=50 else cons).append(f"Debt-to-equity reported by the provider is {de:.1f}.")
+        if rg is not None:(pros if rg>0 else cons).append(f"Revenue growth is {rg*100:.1f}%.")
+        if eg is not None:(pros if eg>0 else cons).append(f"Earnings growth is {eg*100:.1f}%.")
         if om is not None and om>0:pros.append(f"Operating margin is {om*100:.1f}%.")
-        if pe is not None and pe>60:cons.append(f"Trailing P/E is {pe:.1f}, indicating a relatively high earnings multiple.")
-        if PA_num(PA_val(info,"dividendYield")) in (None,0):cons.append("No regular dividend yield is currently reported by the provider.")
+        if pe is not None and pe>60:cons.append(f"Trailing P/E is {pe:.1f}, a relatively high earnings multiple.")
         c1,c2=st.columns(2)
-        with c1:
-            st.markdown("#### ✅ Strengths")
-            if pros:
-                for x in pros:st.write("•",x)
-            else:st.write("No rule-based strength triggered from available fields.")
-        with c2:
-            st.markdown("#### ⚠️ Risks / Watch")
-            if cons:
-                for x in cons:st.write("•",x)
-            else:st.write("No rule-based risk triggered from available fields.")
-        st.caption("These are rule-based observations from available financial fields, not a buy/sell recommendation.")
+        with c1:st.markdown("#### ✅ Strengths");[st.write("•",x) for x in pros] if pros else st.write("No rule-based strength triggered.")
+        with c2:st.markdown("#### ⚠️ Risks / Watch");[st.write("•",x) for x in cons] if cons else st.write("No rule-based risk triggered.")
+        st.caption("Rule-based observations, not a price prediction or recommendation.")
 
-    with tabs[3]:
+    elif section=="Peers":
         st.markdown("### Peers")
-        sector=PA_val(info,"sector")
-        peer_syms=[]
-        if sector:
-            # lightweight peer discovery from the app universe using cached ticker info
-            for ps in _all_symbols[:120]:
-                if ps==symbol:continue
-                try:
-                    pi=yf.Ticker(ps+".NS").info
-                    if pi.get("sector")==sector:
-                        peer_syms.append(ps)
-                    if len(peer_syms)>=8:break
-                except:pass
-        if not peer_syms:st.info("Automatic peer discovery is unavailable for this stock.")
-        else:
-            pdata=[]
-            for ps in peer_syms:
-                try:
-                    pi=yf.Ticker(ps+".NS").info
-                    pdata.append({"Stock":ps,"Price":pi.get("currentPrice"),"Market Cap":pi.get("marketCap"),"P/E":pi.get("trailingPE"),"ROE %":(pi.get("returnOnEquity") or 0)*100})
-                except:pass
-            st.dataframe(pd.DataFrame(pdata),use_container_width=True,hide_index=True)
+        st.info("Peer discovery is on-demand because scanning many Yahoo company profiles is slow.")
+        if st.button("Load peers",key="pa_load_peers"):
+            sector=PA_val(info,"sector");pdata=[]
+            if sector:
+                for ps in _all_symbols[:80]:
+                    if ps==symbol:continue
+                    try:
+                        pi=fundamentals_for_stock(ps)
+                        if pi.get("sector")==sector:
+                            pdata.append({"Stock":ps,"Market Cap":pi.get("marketCap"),"P/E":pi.get("trailingPE"),"ROE %":(pi.get("returnOnEquity") or 0)*100})
+                        if len(pdata)>=8:break
+                    except:pass
+            if pdata:st.dataframe(pd.DataFrame(pdata),use_container_width=True,hide_index=True)
+            else:st.info("Automatic peer discovery unavailable.")
 
-    with tabs[4]:
-        st.markdown("### Quarterly Results")
-        PA_statement(qpl,"Recent quarters")
+    elif section in ["Quarters","Profit & Loss","Balance Sheet","Cash Flow"]:
+        with st.spinner("Loading financial statements..."):qpl,apl,abs_,acf=PA_statements(ticker)
+        if section=="Quarters":PA_statement(qpl,"Recent quarters")
+        elif section=="Profit & Loss":PA_statement(apl,"Annual Profit & Loss")
+        elif section=="Balance Sheet":PA_statement(abs_,"Annual Balance Sheet")
+        else:PA_statement(acf,"Annual Cash Flow")
 
-    with tabs[5]:
-        PA_statement(apl,"Annual Profit & Loss")
+    elif section=="Ratios":
+        rv=[("P/E",PA_val(info,"trailingPE")),("Forward P/E",PA_val(info,"forwardPE")),("P/B",PA_val(info,"priceToBook")),("EV/EBITDA",PA_val(info,"enterpriseToEbitda")),("PEG",PA_val(info,"pegRatio")),("Profit Margin",PA_pct(PA_val(info,"profitMargins"))),("Operating Margin",PA_pct(PA_val(info,"operatingMargins"))),("Gross Margin",PA_pct(PA_val(info,"grossMargins"))),("ROE",PA_pct(PA_val(info,"returnOnEquity"))),("ROA",PA_pct(PA_val(info,"returnOnAssets"))),("Current Ratio",PA_val(info,"currentRatio")),("Quick Ratio",PA_val(info,"quickRatio")),("Debt/Equity",PA_val(info,"debtToEquity")),("Revenue Growth",PA_pct(PA_val(info,"revenueGrowth"))),("Earnings Growth",PA_pct(PA_val(info,"earningsGrowth")))]
+        st.dataframe(pd.DataFrame(rv,columns=["Ratio","Value"]),use_container_width=True,hide_index=True)
 
-    with tabs[6]:
-        PA_statement(abs_,"Annual Balance Sheet")
-
-    with tabs[7]:
-        PA_statement(acf,"Annual Cash Flow")
-
-    with tabs[8]:
-        st.markdown("### Valuation")
-        rv=[
-            ("P/E",PA_val(info,"trailingPE")),("Forward P/E",PA_val(info,"forwardPE")),("P/B",PA_val(info,"priceToBook")),
-            ("EV/EBITDA",PA_val(info,"enterpriseToEbitda")),("PEG",PA_val(info,"pegRatio")),
-            ("Profit Margin",PA_pct(PA_val(info,"profitMargins"))),("Operating Margin",PA_pct(PA_val(info,"operatingMargins"))),
-            ("Gross Margin",PA_pct(PA_val(info,"grossMargins"))),("ROE",PA_pct(PA_val(info,"returnOnEquity"))),
-            ("ROA",PA_pct(PA_val(info,"returnOnAssets"))),("Current Ratio",PA_val(info,"currentRatio")),("Quick Ratio",PA_val(info,"quickRatio")),
-            ("Debt/Equity",PA_val(info,"debtToEquity")),("Revenue Growth",PA_pct(PA_val(info,"revenueGrowth"))),("Earnings Growth",PA_pct(PA_val(info,"earningsGrowth")))
-        ]
-        rdf=pd.DataFrame(rv,columns=["Ratio","Value"])
-        st.dataframe(rdf,use_container_width=True,hide_index=True)
-
-    with tabs[9]:
+    elif section=="Investors":
         st.markdown("### Shareholding Pattern")
-        st.caption("Quarterly ownership. Official NSE filing data is attempted first; Yahoo data is used only as fallback.")
-        sh=PA_nse_shareholding(symbol)
+        with st.spinner("Loading NSE shareholding only now..."):sh=PA_nse_shareholding(symbol)
         if not sh.empty:
-            latest=sh.iloc[-1]; previous=sh.iloc[-2] if len(sh)>1 else None
-            boxes=st.columns(4)
-            for box,col,label in zip(boxes,["FII","DII","Promoters","Public"],["FII","DII","Promoters","Public"]):
-                v=latest.get(col)
-                delta=None
-                if previous is not None and pd.notna(v) and pd.notna(previous.get(col)):
-                    delta=f"{float(v)-float(previous.get(col)):+.2f} pp"
-                box.metric(label,f"{float(v):.2f}%" if pd.notna(v) else "N/A",delta)
+            latest=sh.iloc[-1];previous=sh.iloc[-2] if len(sh)>1 else None;boxes=st.columns(4)
+            for box,col in zip(boxes,["FII","DII","Promoters","Public"]):
+                v=latest.get(col);delta=None
+                if previous is not None and pd.notna(v) and pd.notna(previous.get(col)):delta=f"{float(v)-float(previous.get(col)):+.2f} pp"
+                box.metric(col,f"{float(v):.2f}%" if pd.notna(v) else "N/A",delta)
             use=[c for c in ["Promoters","FII","DII","Government","Public","Others","Shareholders"] if c in sh and sh[c].notna().any()]
-            table=sh.set_index("Period")[use].T
-            disp=table.copy().astype(object)
-            for rr in disp.index:
-                for cc in disp.columns:
-                    v=disp.loc[rr,cc]
-                    if pd.isna(v):disp.loc[rr,cc]="—"
-                    elif rr=="Shareholders":disp.loc[rr,cc]=f"{int(float(v)):,}"
-                    else:disp.loc[rr,cc]=f"{float(v):.2f}%"
-            st.dataframe(disp,use_container_width=True)
-            if previous is not None:
-                st.markdown("#### Latest-quarter ownership movement")
-                for col,label in [("FII","FII"),("DII","DII"),("Promoters","Promoters"),("Public","Public")]:
-                    a=latest.get(col);b=previous.get(col)
-                    if pd.notna(a) and pd.notna(b):
-                        d=float(a)-float(b)
-                        st.write(f"{'🟢' if d>0 else '🔴' if d<0 else '⚪'} **{label}:** {d:+.2f} percentage points")
+            table=sh.set_index("Period")[use].T;st.dataframe(table,use_container_width=True)
             st.caption("Source: NSE corporate shareholding-pattern feed.")
         else:
-            st.warning("NSE quarterly shareholding data is temporarily unavailable for this symbol. Showing fallback holder data.")
-            ih=PA_num(PA_val(info,"heldPercentInstitutions")); insider=PA_num(PA_val(info,"heldPercentInsiders"))
-            x1,x2=st.columns(2);x1.metric("Institutions",PA_pct(ih));x2.metric("Insiders",PA_pct(insider))
-            if inst is not None and not inst.empty:
-                st.markdown("#### Institutional holders")
-                st.dataframe(inst,use_container_width=True,hide_index=True)
-            if major is not None and not major.empty:
-                st.markdown("#### Major-holder summary")
-                st.dataframe(major,use_container_width=True)
-            st.caption("Fallback source: Yahoo Finance. The app does not invent quarterly FII/DII percentages when NSE data cannot be retrieved.")
+            st.warning("NSE quarterly shareholding is unavailable. Loading Yahoo holder fallback...")
+            major,inst=PA_holders(ticker)
+            ih=PA_num(PA_val(info,"heldPercentInstitutions"));insider=PA_num(PA_val(info,"heldPercentInsiders"));x1,x2=st.columns(2);x1.metric("Institutions",PA_pct(ih));x2.metric("Insiders",PA_pct(insider))
+            if not inst.empty:st.dataframe(inst,use_container_width=True,hide_index=True)
+            if not major.empty:st.dataframe(major,use_container_width=True)
 
-    with tabs[10]:
+    elif section=="News":
         st.markdown("### Latest company news")
-        try:
-            news=yf.Ticker(ticker).news or []
-        except Exception:news=[]
+        with st.spinner("Loading company news..."):news=PA_company_news(ticker)
         if not news:st.info("No recent news returned by the current provider.")
         for n in news[:15]:
-            c=n.get("content",n) if isinstance(n,dict) else {}
-            title=c.get("title") or n.get("title","News")
-            summary=c.get("summary") or ""
-            provider=(c.get("provider") or {}).get("displayName","") if isinstance(c.get("provider"),dict) else ""
-            st.markdown(f"**{title}**")
-            if provider:st.caption(provider)
-            if summary:st.write(summary)
+            c=n.get("content",n) if isinstance(n,dict) else {};title=c.get("title") or n.get("title","News");summary=c.get("summary") or "";provider=(c.get("provider") or {}).get("displayName","") if isinstance(c.get("provider"),dict) else ""
+            st.markdown(f"**{title}**");st.caption(provider) if provider else None;st.write(summary) if summary else None
 
 elif page=="🚀 Swing Screeners":
     st.markdown("## 🚀 Famous Swing-Trading Screener Library")
