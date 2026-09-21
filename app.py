@@ -1412,7 +1412,7 @@ elif page=="🚀 Swing Screeners":
 
 
 elif page=="📰 Stock News":
-    st.markdown("<div class='hero'><div class='eyebrow'>LIVE CATALYST FEED</div><h1>📰 Stock News & Event Radar</h1><p>Latest stock-moving headlines with source, age, catalyst type and likely market relevance.</p></div>",unsafe_allow_html=True)
+    st.markdown("<div class='hero'><div class='eyebrow'>LIVE CATALYST FEED</div><h1>📰 Stock News & Event Radar</h1><p>Fresh stock-moving catalysts only — newest first. News cannot reliably predict future events; this page surfaces newly reported information that may affect the next session.</p></div>",unsafe_allow_html=True)
 
     @st.cache_data(ttl=300,show_spinner=False)
     def NEWS_feed(query,max_items=60):
@@ -1434,18 +1434,24 @@ elif page=="📰 Stock News":
         except Exception:pass
         return rows
 
-    def NEWS_age(pub):
+    def NEWS_datetime(pub):
         from email.utils import parsedate_to_datetime
-        from datetime import datetime, timezone
+        from datetime import timezone
         try:
             dt=parsedate_to_datetime(pub)
             if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
-            sec=max(0,(datetime.now(timezone.utc)-dt.astimezone(timezone.utc)).total_seconds())
-            if sec<3600:return f"{max(1,int(sec//60))} min ago"
-            if sec<86400:return f"{int(sec//3600)} hr ago"
-            d=int(sec//86400)
-            return f"{d} day{'s' if d!=1 else ''} ago"
-        except:return ""
+            return dt.astimezone(timezone.utc)
+        except:return None
+
+    def NEWS_age(pub):
+        from datetime import datetime, timezone
+        dt=NEWS_datetime(pub)
+        if dt is None:return "Time unavailable"
+        sec=max(0,(datetime.now(timezone.utc)-dt).total_seconds())
+        if sec<3600:return f"{max(1,int(sec//60))} min ago"
+        if sec<86400:return f"{int(sec//3600)} hr ago"
+        d=int(sec//86400)
+        return f"{d} day{'s' if d!=1 else ''} ago"
 
     def NEWS_tag(t):
         x=t.lower()
@@ -1476,7 +1482,7 @@ elif page=="📰 Stock News":
     c1,c2,c3=st.columns([1.35,1,0.65])
     with c1: nq=st.text_input("Stock / company / topic","",placeholder="e.g. Lenskart, RELIANCE, block deal")
     with c2: ntype=st.selectbox("News type",["All","Block/Bulk Deals","Government/Regulatory","Order Wins","Results","Corporate Actions","Brokerage","M&A / Stake","Legal/Negative"])
-    with c3: hours=st.selectbox("Freshness",["24 Hours","3 Days","7 Days","30 Days"],index=1)
+    with c3: hours=st.selectbox("Freshness",["Today / 24 Hours","3 Days","7 Days"],index=0)
     nmax=st.slider("Articles",10,60,30,10)
 
     source_query='(Moneycontrol OR "NDTV Profit" OR CNBC-TV18 OR "Economic Times" OR BusinessLine OR Reuters OR "Business Standard")'
@@ -1484,7 +1490,7 @@ elif page=="📰 Stock News":
         query=f'{nq.strip()} stock NSE {source_query}'
     else:
         query=f'India stocks NSE (block deal OR order win OR government approval OR results OR buyback OR acquisition OR brokerage) {source_query}'
-    daymap={"24 Hours":"when:1d","3 Days":"when:3d","7 Days":"when:7d","30 Days":"when:30d"}
+    daymap={"Today / 24 Hours":"when:1d","3 Days":"when:3d","7 Days":"when:7d"}
     query+=" "+daymap[hours]
 
     if st.button("⚡ Load Latest News",use_container_width=False) or True:
@@ -1497,18 +1503,30 @@ elif page=="📰 Stock News":
                 "M&A / Stake":"M&A","Legal/Negative":"Legal"}
             return ntype=="All" or mp[ntype].lower() in tag.lower()
 
+        from datetime import datetime, timezone, timedelta
+        max_age={"Today / 24 Hours":timedelta(hours=24),"3 Days":timedelta(days=3),"7 Days":timedelta(days=7)}[hours]
+        cutoff=datetime.now(timezone.utc)-max_age
         enriched=[]
+        seen=set()
         for z in items:
+            dt=NEWS_datetime(z["published"])
+            # Google can return stale results even with when:1d; enforce date locally.
+            if dt is None or dt < cutoff:
+                continue
+            title_key=re.sub(r"[^a-z0-9]+"," ",z["title"].lower()).strip()
+            if title_key in seen:continue
+            seen.add(title_key)
             tag=NEWS_tag(z["title"])
             if keep_type(tag):
-                z=dict(z);z["tag"]=tag;z["age"]=NEWS_age(z["published"]);z["bias"]=NEWS_bias(tag,z["title"]);enriched.append(z)
-            if len(enriched)>=nmax:break
+                z=dict(z);z["tag"]=tag;z["age"]=NEWS_age(z["published"]);z["bias"]=NEWS_bias(tag,z["title"]);z["_dt"]=dt;enriched.append(z)
+        enriched.sort(key=lambda x:x["_dt"],reverse=True)
+        enriched=enriched[:nmax]
 
         if not enriched:
             st.info("No matching fresh headlines were returned. Try All news types or a wider freshness range.")
         else:
             st.markdown(f"### Latest market-moving news · {len(enriched)} headlines")
-            st.caption("Potential impact labels are event-type hints, not predictions. Open the source and verify the full announcement before trading.")
+            st.caption("Only articles inside the selected freshness window are shown, newest first. Impact labels describe the event type; they do not predict the future price.")
             for z in enriched:
                 source=z["source"] or "News source"
                 safe_title=z["title"].replace("<","&lt;").replace(">","&gt;")
