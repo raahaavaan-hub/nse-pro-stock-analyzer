@@ -975,6 +975,8 @@ elif page=="🔥 Market Heatmap":
                 stock_heat_prices.clear()
             except Exception:
                 pass
+            st.session_state.pop("heat_saved_result",None)
+            st.session_state.pop("heat_saved_signature",None)
             st.rerun()
 
     move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
@@ -1059,11 +1061,37 @@ elif page=="🔥 Market Heatmap":
         order={s:i for i,s in enumerate(syms)}
         return sorted(result,key=lambda x:order.get(x[0],999999))
 
-    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
-        rows=stock_heat_prices(tuple(syms),heat_period)
+    # IMPORTANT: never block initial page rendering with thousands of network calls.
+    # Show the page immediately. Fetch prices only when requested, then retain them.
+    heat_signature=(universe_name,heat_period)
+    saved=st.session_state.get("heat_saved_result")
+    saved_sig=st.session_state.get("heat_saved_signature")
+
+    load_col,info_col=st.columns([0.22,0.78])
+    with load_col:
+        load_heat=st.button("⚡ Load / Update Heatmap",use_container_width=True,key="heat_load_now")
+    with info_col:
+        if saved is not None and saved_sig==heat_signature:
+            st.caption("Showing cached heatmap. Press Load / Update only when you want fresh prices.")
+        else:
+            st.caption("Page loaded. Press Load / Update Heatmap to fetch prices; stock analysis loads only after you click a stock.")
+
+    if load_heat:
+        with st.spinner(f"Fetching {len(syms):,} {universe_name} prices..."):
+            fresh_rows=stock_heat_prices(tuple(syms),heat_period)
+        st.session_state["heat_saved_result"]=fresh_rows
+        st.session_state["heat_saved_signature"]=heat_signature
+        rows=fresh_rows
+    elif saved is not None and saved_sig==heat_signature:
+        rows=saved
+    else:
+        rows=[]
 
     if not rows:
-        st.warning("Stock data unavailable. Press Refresh.")
+        if load_heat:
+            st.warning("The price provider returned no data. Try Load / Update again.")
+        else:
+            st.info("Heatmap is ready to load. Choose the universe and period, then press **⚡ Load / Update Heatmap**.")
     else:
         up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows); flat=len(rows)-up-down
         m=st.columns(4)
