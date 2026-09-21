@@ -971,7 +971,10 @@ elif page=="🔥 Market Heatmap":
         sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
     with f4:
         if st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh"):
-            stock_heat_prices.clear() if "stock_heat_prices" in globals() else None
+            try:
+                stock_heat_prices.clear()
+            except Exception:
+                pass
             st.rerun()
 
     move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
@@ -989,8 +992,15 @@ elif page=="🔥 Market Heatmap":
             target={"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
             syms=(nifty50+[x for x in all_syms if x not in nifty50])[:target]
 
-    @st.cache_data(ttl=300,show_spinner=False)
+    @st.cache_data(ttl=600,show_spinner=False)
     def stock_heat_prices(symbols,period_label):
+        """
+        Concurrent batched loader.
+        A single 2,500+ ticker Yahoo request can stall/crash on Streamlit Cloud.
+        This uses several smaller Yahoo requests concurrently, then merges them.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         cfg={
             "1 Day":("2d",1),"1 Week":("1mo",5),"1 Month":("3mo",21),
             "3 Months":("6mo",63),"6 Months":("1y",126),
@@ -998,32 +1008,54 @@ elif page=="🔥 Market Heatmap":
         }
         yf_period,lookback=cfg[period_label]
         syms=list(symbols)
-        ticks=[s+".NS" for s in syms]
-        try:
-            data=yf.download(ticks,period=yf_period,interval="1d",
-                group_by="ticker",auto_adjust=False,progress=False,
-                threads=True,timeout=12)
-        except TypeError:
+
+        # Smaller groups are much more reliable than one 2,595-ticker request.
+        batch_size=180 if len(syms)>500 else 100
+        batches=[syms[i:i+batch_size] for i in range(0,len(syms),batch_size)]
+
+        def fetch_batch(batch):
+            ticks=[s+".NS" for s in batch]
             try:
-                data=yf.download(ticks,period=yf_period,interval="1d",
-                    group_by="ticker",auto_adjust=False,progress=False,threads=True)
+                try:
+                    data=yf.download(
+                        ticks,period=yf_period,interval="1d",
+                        group_by="ticker",auto_adjust=False,progress=False,
+                        threads=True,timeout=10
+                    )
+                except TypeError:
+                    data=yf.download(
+                        ticks,period=yf_period,interval="1d",
+                        group_by="ticker",auto_adjust=False,progress=False,
+                        threads=True
+                    )
             except Exception:
                 return []
-        except Exception:
-            return []
-        if data is None or data.empty:return []
+
+            if data is None or data.empty:return []
+            out=[]
+            for s,t in zip(batch,ticks):
+                try:
+                    d=data if len(batch)==1 else data[t]
+                    c=d["Close"].dropna()
+                    if c.empty:continue
+                    last=float(c.iloc[-1])
+                    base=float(c.iloc[-(lookback+1)]) if len(c)>lookback else float(c.iloc[0])
+                    ch=last-base
+                    pct=(ch/base*100.0) if base else 0.0
+                    out.append((s,last,ch,pct))
+                except Exception:
+                    pass
+            return out
+
         result=[]
-        for s,t in zip(syms,ticks):
-            try:
-                d=data if len(syms)==1 else data[t]
-                c=d["Close"].dropna()
-                if c.empty:continue
-                last=float(c.iloc[-1])
-                base=float(c.iloc[-(lookback+1)]) if len(c)>lookback else float(c.iloc[0])
-                ch=last-base
-                result.append((s,last,ch,(ch/base*100.0) if base else 0.0))
-            except Exception:
-                pass
+        # Parallelize batches, but keep worker count conservative for Streamlit Cloud.
+        workers=min(6,max(1,len(batches)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures=[ex.submit(fetch_batch,b) for b in batches]
+            for f in as_completed(futures):
+                try:result.extend(f.result())
+                except Exception:pass
+
         order={s:i for i,s in enumerate(syms)}
         return sorted(result,key=lambda x:order.get(x[0],999999))
 
