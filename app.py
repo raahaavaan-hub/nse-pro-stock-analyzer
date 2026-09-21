@@ -1,5 +1,6 @@
 
 import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
+import requests
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
@@ -887,6 +888,66 @@ st.sidebar.link_button(
 )
 st.sidebar.caption("Open the live app.py file directly when you want to update the website.")
 
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def PA_nse_shareholding(symbol):
+    """Best-effort official NSE shareholding pattern loader."""
+    base="https://www.nseindia.com"
+    h={"User-Agent":"Mozilla/5.0","Accept":"application/json,text/plain,*/*",
+       "Referer":base+"/companies-listing/corporate-filings-shareholding-pattern"}
+    sess=requests.Session(); sess.headers.update(h)
+    try:sess.get(base,timeout=8)
+    except Exception:pass
+    urls=[
+      f"{base}/api/corporate-share-holdings-master?index=equities&symbol={symbol}",
+      f"{base}/api/corporate-share-holdings?index=equities&symbol={symbol}"
+    ]
+    payload=None
+    for u in urls:
+        try:
+            rr=sess.get(u,timeout=12)
+            if rr.ok and rr.text.strip():
+                payload=rr.json()
+                if payload:break
+        except Exception:pass
+    if not payload:return pd.DataFrame()
+
+    records=[]
+    def walk(v):
+        if isinstance(v,list):
+            for z in v:walk(z)
+        elif isinstance(v,dict):
+            lk=" ".join(str(k).lower() for k in v)
+            if any(w in lk for w in ["fii","dii","promoter","public","foreign institutional","foreign portfolio"]):
+                records.append(v)
+            for z in v.values():
+                if isinstance(z,(dict,list)):walk(z)
+    walk(payload)
+
+    def val(d,terms):
+        for k,v in d.items():
+            k=str(k).lower().replace("_"," ")
+            if any(t in k for t in terms):
+                try:return float(str(v).replace("%","").replace(",","").strip())
+                except:pass
+        return None
+    rows=[]
+    for d in records:
+        period=""
+        for k,v in d.items():
+            if any(t in str(k).lower() for t in ["date","quarter","period","as on"]):
+                if v not in (None,""):period=str(v);break
+        row={"Period":period,
+             "Promoters":val(d,["promoter"]),
+             "FII":val(d,["fii","foreign institutional","foreign portfolio"]),
+             "DII":val(d,["dii","domestic institutional","mutual fund"]),
+             "Government":val(d,["government"]),
+             "Public":val(d,["public"]),
+             "Others":val(d,["others","other"]),
+             "Shareholders":val(d,["shareholder"])}
+        if any(row[k] is not None for k in ["Promoters","FII","DII","Government","Public","Others"]):rows.append(row)
+    return pd.DataFrame(rows).drop_duplicates().tail(12) if rows else pd.DataFrame()
+
 if page=="🏠 Dashboard":
     st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
     c=st.columns(4)
@@ -1234,18 +1295,47 @@ elif page=="🧠 Pro Analyzer":
         st.dataframe(rdf,use_container_width=True,hide_index=True)
 
     with tabs[9]:
-        st.markdown("### Shareholding / Institutional Investors")
-        ih=PA_num(PA_val(info,"heldPercentInstitutions")); insider=PA_num(PA_val(info,"heldPercentInsiders"))
-        x1,x2=st.columns(2);x1.metric("Institutions",PA_pct(ih));x2.metric("Insiders",PA_pct(insider))
-        if inst is not None and not inst.empty:
-            show=inst.copy()
-            st.markdown("#### Reported institutional holders")
-            st.dataframe(show,use_container_width=True,hide_index=True)
+        st.markdown("### Shareholding Pattern")
+        st.caption("Quarterly ownership. Official NSE filing data is attempted first; Yahoo data is used only as fallback.")
+        sh=PA_nse_shareholding(symbol)
+        if not sh.empty:
+            latest=sh.iloc[-1]; previous=sh.iloc[-2] if len(sh)>1 else None
+            boxes=st.columns(4)
+            for box,col,label in zip(boxes,["FII","DII","Promoters","Public"],["FII","DII","Promoters","Public"]):
+                v=latest.get(col)
+                delta=None
+                if previous is not None and pd.notna(v) and pd.notna(previous.get(col)):
+                    delta=f"{float(v)-float(previous.get(col)):+.2f} pp"
+                box.metric(label,f"{float(v):.2f}%" if pd.notna(v) else "N/A",delta)
+            use=[c for c in ["Promoters","FII","DII","Government","Public","Others","Shareholders"] if c in sh and sh[c].notna().any()]
+            table=sh.set_index("Period")[use].T
+            disp=table.copy().astype(object)
+            for rr in disp.index:
+                for cc in disp.columns:
+                    v=disp.loc[rr,cc]
+                    if pd.isna(v):disp.loc[rr,cc]="—"
+                    elif rr=="Shareholders":disp.loc[rr,cc]=f"{int(float(v)):,}"
+                    else:disp.loc[rr,cc]=f"{float(v):.2f}%"
+            st.dataframe(disp,use_container_width=True)
+            if previous is not None:
+                st.markdown("#### Latest-quarter ownership movement")
+                for col,label in [("FII","FII"),("DII","DII"),("Promoters","Promoters"),("Public","Public")]:
+                    a=latest.get(col);b=previous.get(col)
+                    if pd.notna(a) and pd.notna(b):
+                        d=float(a)-float(b)
+                        st.write(f"{'🟢' if d>0 else '🔴' if d<0 else '⚪'} **{label}:** {d:+.2f} percentage points")
+            st.caption("Source: NSE corporate shareholding-pattern feed.")
         else:
-            st.info("Detailed quarterly FII/DII shareholding history is not supplied by the current Yahoo Finance feed. Use an NSE/shareholding-pattern source for exact FII/DII quarterly percentages.")
-        if major is not None and not major.empty:
-            st.markdown("#### Major-holder summary")
-            st.dataframe(major,use_container_width=True,hide_index=True)
+            st.warning("NSE quarterly shareholding data is temporarily unavailable for this symbol. Showing fallback holder data.")
+            ih=PA_num(PA_val(info,"heldPercentInstitutions")); insider=PA_num(PA_val(info,"heldPercentInsiders"))
+            x1,x2=st.columns(2);x1.metric("Institutions",PA_pct(ih));x2.metric("Insiders",PA_pct(insider))
+            if inst is not None and not inst.empty:
+                st.markdown("#### Institutional holders")
+                st.dataframe(inst,use_container_width=True,hide_index=True)
+            if major is not None and not major.empty:
+                st.markdown("#### Major-holder summary")
+                st.dataframe(major,use_container_width=True)
+            st.caption("Fallback source: Yahoo Finance. The app does not invent quarterly FII/DII percentages when NSE data cannot be retrieved.")
 
     with tabs[10]:
         st.markdown("### Latest company news")
