@@ -971,10 +971,7 @@ elif page=="🔥 Market Heatmap":
         sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
     with f4:
         if st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh"):
-            try:
-                stock_heat_prices.clear()
-            except Exception:
-                pass
+            st.session_state["force_heat_refresh"]=True
             st.rerun()
 
     move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
@@ -992,7 +989,7 @@ elif page=="🔥 Market Heatmap":
             target={"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
             syms=(nifty50+[x for x in all_syms if x not in nifty50])[:target]
 
-    @st.cache_data(ttl=600,show_spinner=False)
+    @st.cache_data(ttl=1800,show_spinner=False)
     def stock_heat_prices(symbols,period_label):
         """
         Concurrent batched loader.
@@ -1049,7 +1046,7 @@ elif page=="🔥 Market Heatmap":
 
         result=[]
         # Parallelize batches, but keep worker count conservative for Streamlit Cloud.
-        workers=min(6,max(1,len(batches)))
+        workers=min(4,max(1,len(batches)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures=[ex.submit(fetch_batch,b) for b in batches]
             for f in as_completed(futures):
@@ -1061,8 +1058,22 @@ elif page=="🔥 Market Heatmap":
 
     # Automatic heatmap: no Load button and no Pro Analyzer dependency.
     # The concurrent loader is cached, so repeat visits reuse the latest snapshot.
-    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
-        rows=stock_heat_prices(tuple(syms),heat_period)
+    heat_key=(universe_name,heat_period)
+    _saved_heat=st.session_state.get("_instant_heat_rows")
+    _saved_key=st.session_state.get("_instant_heat_key")
+    _force=st.session_state.pop("force_heat_refresh",False)
+
+    if _saved_heat is not None and _saved_key==heat_key and not _force:
+        rows=_saved_heat
+    else:
+        with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
+            if _force:
+                try: stock_heat_prices.clear()
+                except Exception: pass
+            rows=stock_heat_prices(tuple(syms),heat_period)
+        if rows:
+            st.session_state["_instant_heat_rows"]=rows
+            st.session_state["_instant_heat_key"]=heat_key
 
     if not rows:
         st.warning("The price provider returned no heatmap data. Press Refresh once.")
