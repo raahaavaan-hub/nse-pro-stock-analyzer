@@ -964,7 +964,7 @@ elif page=="🔥 Market Heatmap":
 
     f1,f2,f3,f4=st.columns([2,2,2,1])
     with f1:
-        universe_name=st.selectbox("Stocks",["NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500","ALL NSE"],index=0,key="heat_stock_universe_v2")
+        universe_name=st.selectbox("Stocks",["ALL NSE","NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500"],index=0,key="heat_stock_universe_v3")
     with f2:
         heat_period=st.selectbox("Performance",["1 Day","1 Week","1 Month","3 Months","6 Months","1 Year","5 Years"],index=0,key="heat_period")
     with f3:
@@ -975,8 +975,6 @@ elif page=="🔥 Market Heatmap":
                 stock_heat_prices.clear()
             except Exception:
                 pass
-            st.session_state.pop("heat_saved_result",None)
-            st.session_state.pop("heat_saved_signature",None)
             st.rerun()
 
     move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
@@ -1061,37 +1059,13 @@ elif page=="🔥 Market Heatmap":
         order={s:i for i,s in enumerate(syms)}
         return sorted(result,key=lambda x:order.get(x[0],999999))
 
-    # IMPORTANT: never block initial page rendering with thousands of network calls.
-    # Show the page immediately. Fetch prices only when requested, then retain them.
-    heat_signature=(universe_name,heat_period)
-    saved=st.session_state.get("heat_saved_result")
-    saved_sig=st.session_state.get("heat_saved_signature")
-
-    load_col,info_col=st.columns([0.22,0.78])
-    with load_col:
-        load_heat=st.button("⚡ Load / Update Heatmap",use_container_width=True,key="heat_load_now")
-    with info_col:
-        if saved is not None and saved_sig==heat_signature:
-            st.caption("Showing cached heatmap. Press Load / Update only when you want fresh prices.")
-        else:
-            st.caption("Page loaded. Press Load / Update Heatmap to fetch prices; stock analysis loads only after you click a stock.")
-
-    if load_heat:
-        with st.spinner(f"Fetching {len(syms):,} {universe_name} prices..."):
-            fresh_rows=stock_heat_prices(tuple(syms),heat_period)
-        st.session_state["heat_saved_result"]=fresh_rows
-        st.session_state["heat_saved_signature"]=heat_signature
-        rows=fresh_rows
-    elif saved is not None and saved_sig==heat_signature:
-        rows=saved
-    else:
-        rows=[]
+    # Automatic heatmap: no Load button and no Pro Analyzer dependency.
+    # The concurrent loader is cached, so repeat visits reuse the latest snapshot.
+    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
+        rows=stock_heat_prices(tuple(syms),heat_period)
 
     if not rows:
-        if load_heat:
-            st.warning("The price provider returned no data. Try Load / Update again.")
-        else:
-            st.info("Heatmap is ready to load. Choose the universe and period, then press **⚡ Load / Update Heatmap**.")
+        st.warning("The price provider returned no heatmap data. Press Refresh once.")
     else:
         up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows); flat=len(rows)-up-down
         m=st.columns(4)
@@ -1126,9 +1100,9 @@ elif page=="🔥 Market Heatmap":
         cards=[]
         for s,last,ch,pct in rows:
             # Query parameter lets a heatmap tile deep-link into Pro Analyzer.
-            href=f"?page=pro&stock={s}"
+            href="#"
             cards.append(f"<a href='{href}' target='_self' style='text-decoration:none;color:white'><div class='nse-heat-card' style='background:{hc(pct)};min-height:82px;cursor:pointer'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div></a>")
-        st.caption(f"{universe_name} · {len(rows):,} displayed · {heat_period} performance · click a stock to open Pro Analyzer")
+        st.caption(f"{universe_name} · {len(rows):,} displayed · {heat_period} performance")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
 elif page=="🧠 Pro Analyzer":
