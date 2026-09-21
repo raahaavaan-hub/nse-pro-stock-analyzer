@@ -1006,7 +1006,7 @@ elif page=="🔥 Market Heatmap":
         cards=[]
         for s,last,ch,pct in rows:
             # Query parameter lets a heatmap tile deep-link into Pro Analyzer.
-            href=f"?heat_analyze={quote(s)}"
+            href=f"?heat_analyze={s}"
             cards.append(f"<a href='{href}' target='_self' style='text-decoration:none;color:white'><div class='nse-heat-card' style='background:{hc(pct)};min-height:82px;cursor:pointer'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div></a>")
         st.caption(f"{universe_name} · {len(rows):,} displayed · {heat_period} performance · click a stock to open Pro Analyzer")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
