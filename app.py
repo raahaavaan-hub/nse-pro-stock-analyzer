@@ -877,20 +877,6 @@ st.markdown("""
 
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
-# Heatmap tile deep-link: open Pro Analyzer and preload the clicked symbol.
-try:
-    _heat_analyze=st.query_params.get("heat_analyze")
-except Exception:
-    _heat_analyze=None
-if _heat_analyze:
-    st.session_state["main_page"]="🧠 Pro Analyzer"
-    # Common analyzer symbol keys used by this app / retained as fallback.
-    st.session_state["pro_symbol_from_heatmap"]=str(_heat_analyze).upper()
-    page="🧠 Pro Analyzer"
-    try:
-        del st.query_params["heat_analyze"]
-    except Exception:
-        pass
 
 
 st.sidebar.markdown("---")
@@ -950,25 +936,47 @@ elif page=="🔥 Market Heatmap":
         }
         yf_period,lookback=cfg[period_label]
         result=[]
+        loaded=set()
+
+        def add_row(s,c):
+            c=c.dropna()
+            if len(c)<1:return
+            last=float(c.iloc[-1])
+            base=float(c.iloc[-(lookback+1)]) if len(c)>lookback else float(c.iloc[0])
+            ch=last-base
+            pct=(ch/base*100) if base else 0
+            result.append((s,last,ch,pct))
+            loaded.add(s)
+
+        # Fast batch pass
         for k in range(0,len(symbols),100):
             batch=symbols[k:k+100]; tick=[s+".NS" for s in batch]
             try:
                 data=yf.download(tick,period=yf_period,interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
             except Exception:
-                continue
-            for s,t in zip(batch,tick):
-                try:
-                    d=data if len(batch)==1 else data[t]
-                    c=d["Close"].dropna()
-                    if len(c)<1: continue
-                    last=float(c.iloc[-1])
-                    # Compare with the closest available trading close at/before the requested lookback.
-                    base=float(c.iloc[-(lookback+1)]) if len(c)>lookback else float(c.iloc[0])
-                    ch=last-base; pct=(ch/base*100) if base else 0
-                    result.append((s,last,ch,pct))
-                except Exception:
-                    pass
-        return result
+                data=None
+            if data is not None:
+                for s,t in zip(batch,tick):
+                    try:
+                        d=data if len(batch)==1 else data[t]
+                        add_row(s,d["Close"])
+                    except Exception:
+                        pass
+
+        # Retry missing stocks one-by-one. This prevents a partial Yahoo batch
+        # response from turning NIFTY 50 into only 20/42 visible tiles.
+        missing=[s for s in symbols if s not in loaded]
+        for s in missing:
+            try:
+                d=yf.download(s+".NS",period=yf_period,interval="1d",auto_adjust=False,progress=False,threads=False)
+                if isinstance(d.columns,pd.MultiIndex):
+                    d.columns=[c[0] for c in d.columns]
+                add_row(s,d["Close"])
+            except Exception:
+                pass
+
+        order={s:i for i,s in enumerate(symbols)}
+        return sorted(result,key=lambda x:order.get(x[0],999999))
 
     with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
         rows=stock_heat_prices(syms,heat_period)
@@ -979,6 +987,9 @@ elif page=="🔥 Market Heatmap":
         up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows); flat=len(rows)-up-down
         m=st.columns(4)
         m[0].metric("Stocks loaded",len(rows));m[1].metric("🟢 Up",up);m[2].metric("🔴 Down",down);m[3].metric("⚪ Flat",flat)
+        if universe_name=="NIFTY 50" and len(rows)<50:
+            missing_symbols=[s for s in syms if s not in {r[0] for r in rows}]
+            st.warning(f"Price provider returned {len(rows)}/50 NIFTY 50 stocks. Missing: {', '.join(missing_symbols)}")
 
         if move_filter=="🟢 Gainers": rows=[x for x in rows if x[3]>0]
         elif move_filter=="🔴 Losers": rows=[x for x in rows if x[3]<0]
@@ -1006,21 +1017,12 @@ elif page=="🔥 Market Heatmap":
         cards=[]
         for s,last,ch,pct in rows:
             # Query parameter lets a heatmap tile deep-link into Pro Analyzer.
-            href=f"?heat_analyze={s}"
+            href=f"?page=pro&stock={s}"
             cards.append(f"<a href='{href}' target='_self' style='text-decoration:none;color:white'><div class='nse-heat-card' style='background:{hc(pct)};min-height:82px;cursor:pointer'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div></a>")
         st.caption(f"{universe_name} · {len(rows):,} displayed · {heat_period} performance · click a stock to open Pro Analyzer")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
 elif page=="🧠 Pro Analyzer":
-    _heat_symbol=st.session_state.pop("pro_symbol_from_heatmap",None)
-    if _heat_symbol:
-        # Preload the analyzer's stock selector/input where possible.
-        for _k in ["analyze_symbol","pro_symbol","symbol","ticker","stock_symbol","selected_symbol"]:
-            if _k in st.session_state:
-                st.session_state[_k]=_heat_symbol
-        st.session_state["heatmap_selected_symbol"]=_heat_symbol
-        st.info(f"🔥 Opened from Heatmap: {_heat_symbol}")
-
     syms=universe()
     if "analyzer_symbol" not in st.session_state:
         st.session_state["analyzer_symbol"]="TBZ" if "TBZ" in syms else syms[0]
