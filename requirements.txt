@@ -1,2 +1,7 @@
+streamlit
+pandas
+numpy
+requests
+plotly
 yfinance>=0.2.38
 curl_cffi>=0.5.1
