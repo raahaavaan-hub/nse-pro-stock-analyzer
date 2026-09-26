@@ -916,7 +916,7 @@ def WL_normalize(raw):
                 except (TypeError,ValueError):return None
             stocks.append({"date":dt,"stock":str(item.get("stock") or symbol).strip()[:70],
                            "symbol":symbol,"high":level("high"),"stoploss":level("stoploss")})
-        result["lists"][i]["stocks"]=stocks[:200]
+        result["lists"][i]["stocks"]=stocks[:1000]
     return result
 
 def WL_load():
@@ -929,17 +929,40 @@ def WL_save(value):
         return True
     except OSError:return False
 
+@st.cache_data(ttl=86400,show_spinner=False)
+def WL_catalog():
+    try:
+        session=requests.Session();session.headers.update(HEADERS)
+        try:session.get("https://www.nseindia.com",timeout=8)
+        except Exception:pass
+        response=session.get(NSE_URL,timeout=15);response.raise_for_status()
+        frame=pd.read_csv(io.BytesIO(response.content));frame.columns=[str(x).strip() for x in frame.columns]
+        names=[]
+        for _,row in frame.iterrows():
+            symbol=str(row.get("SYMBOL","")).strip().upper()
+            company=str(row.get("NAME OF COMPANY",symbol)).strip()
+            if re.fullmatch(r"[A-Z0-9&.\-]{1,20}",symbol):names.append((company,symbol))
+        if names:return sorted(set(names),key=lambda x:x[0].lower())
+    except Exception:pass
+    return [(symbol,symbol) for symbol in sorted(set(universe()))]
+
 @st.cache_data(ttl=300,show_spinner=False)
 def WL_quotes(symbols):
     out={}
-    for symbol in symbols:
+    for start in range(0,len(symbols),100):
+        batch=list(symbols[start:start+100]);tickers=[symbol+".NS" for symbol in batch]
         try:
-            prices=yf.Ticker(symbol+".NS").history(period="5d",interval="1d",auto_adjust=False)
-            closes=prices["Close"].dropna()
-            if closes.empty:continue
-            latest=float(closes.iloc[-1]);previous=float(closes.iloc[-2]) if len(closes)>1 else None
-            if np.isfinite(latest):out[symbol]={"latest":latest,"previous":previous if previous and np.isfinite(previous) else None,
-                                                "asof":str(closes.index[-1].date())}
+            prices=yf.download(tickers,period="5d",interval="1d",group_by="ticker",
+                               auto_adjust=False,progress=False,threads=True)
+            if prices is None or prices.empty:continue
+            for symbol,ticker in zip(batch,tickers):
+                try:
+                    closes=(prices[ticker]["Close"] if isinstance(prices.columns,pd.MultiIndex) else prices["Close"]).dropna()
+                    if closes.empty:continue
+                    latest=float(closes.iloc[-1]);previous=float(closes.iloc[-2]) if len(closes)>1 else None
+                    if np.isfinite(latest):out[symbol]={"latest":latest,"previous":previous if previous and np.isfinite(previous) else None,
+                                                       "asof":str(closes.index[-1].date())}
+                except Exception:continue
         except Exception:continue
     return out
 
@@ -1052,53 +1075,68 @@ elif page=="📌 Watchlist":
             else:st.error("Could not save the restored lists on this server.")
         except (ValueError,UnicodeDecodeError):st.error("Choose a valid watchlist JSON backup.")
     st.caption("Prices are the latest available daily close, cached for five minutes. They may lag the live market. Your high and stop-loss remain your own entries. Back up the lists before redeploying the app.")
-    symbols=tuple(sorted({row["symbol"] for part in watch["lists"] for row in part["stocks"]}))
-    quotes=WL_quotes(symbols) if symbols else {}
-    tabs=st.tabs([f"{i+1} · {part['name']}" for i,part in enumerate(watch["lists"])])
-    for i,tab in enumerate(tabs):
-        with tab:
-            current=watch["lists"][i]
-            st.markdown(f"#### {html.escape(current['name'])}")
-            st.caption("Add a row with its date, stock name, NSE symbol, high and stop-loss. Delete unwanted rows in the editor, then save.")
-            editable=pd.DataFrame([{
-                "Date":date.fromisoformat(row["date"]),"Stock name":row["stock"],"NSE symbol":row["symbol"],
-                "High":row["high"],"Stop-loss":row["stoploss"]
-            } for row in current["stocks"]],columns=["Date","Stock name","NSE symbol","High","Stop-loss"])
-            with st.form(f"wl_form_{i}"):
-                name=st.text_input("Edit this tab name",value=current["name"],max_chars=32,key=f"wl_name_{i}")
-                changed=st.data_editor(editable,num_rows="dynamic",hide_index=True,use_container_width=True,key=f"wl_editor_{i}",
-                    column_config={"Date":st.column_config.DateColumn("Date",format="DD MMM YYYY",default=date.today()),
-                                   "Stock name":st.column_config.TextColumn("Stock name"),
-                                   "NSE symbol":st.column_config.TextColumn("NSE symbol",help="Example: RELIANCE (without .NS)"),
-                                   "High":st.column_config.NumberColumn("High ₹",min_value=0.0,format="₹%.2f"),
-                                   "Stop-loss":st.column_config.NumberColumn("Stop-loss ₹",min_value=0.0,format="₹%.2f")})
-                save=st.form_submit_button("Save this watchlist",type="primary")
-            if save:
-                newrows=[];errors=[]
-                for rownum,row in enumerate(changed.to_dict("records"),1):
-                    raw_symbol=str(row.get("NSE symbol") or "").strip().upper().removesuffix(".NS")
-                    if not raw_symbol and not str(row.get("Stock name") or "").strip():continue
-                    if not re.fullmatch(r"[A-Z0-9&.\-]{1,20}",raw_symbol):
-                        errors.append(f"Row {rownum}: enter an NSE symbol such as RELIANCE.");continue
-                    raw_date=row.get("Date")
-                    try:day=pd.Timestamp(raw_date).date().isoformat() if pd.notna(raw_date) else date.today().isoformat()
-                    except (TypeError,ValueError):day=date.today().isoformat()
-                    def entered_level(key):
-                        try:
-                            value=float(row.get(key))
-                            return value if np.isfinite(value) and value>0 else None
-                        except (ValueError,TypeError):return None
-                    newrows.append({"date":day,"stock":str(row.get("Stock name") or raw_symbol).strip(),
-                                    "symbol":raw_symbol,"high":entered_level("High"),"stoploss":entered_level("Stop-loss")})
-                if errors:st.error(" ".join(errors))
+    labels=[f"{n+1} · {part['name']}" for n,part in enumerate(watch["lists"])]
+    selected=st.radio("Your 10 watchlist tabs",labels,horizontal=True,key="wl_active_tab")
+    i=labels.index(selected);current=watch["lists"][i]
+    st.markdown(f"#### {html.escape(current['name'])} · {len(current['stocks'])}/1,000 stocks")
+    rename_col,save_col=st.columns([4,1])
+    with rename_col:new_name=st.text_input("Edit this tab name",value=current["name"],max_chars=32,key=f"wl_name_{i}")
+    with save_col:
+        st.write("")
+        if st.button("Save name",key=f"wl_rename_{i}",use_container_width=True):
+            watch["lists"][i]["name"]=new_name.strip() or f"Watchlist {i+1}"
+            if WL_save(watch):st.rerun()
+            else:st.error("Could not save on this server.")
+
+    with st.form(f"wl_add_{i}",clear_on_submit=True):
+        st.markdown("##### ＋ Add stock")
+        catalog=WL_catalog()
+        options=["Search by company name or NSE symbol..."]+[f"{name} · {symbol}" for name,symbol in catalog]
+        chosen=st.selectbox("Stock name",options,key=f"wl_stock_search_{i}",
+                            help="Click here and type the company name; matching NSE stocks appear in the dropdown.")
+        when,high_col,stop_col=st.columns(3)
+        with when:entry_date=st.date_input("Date",value=date.today(),key=f"wl_date_{i}")
+        with high_col:high=st.number_input("High ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_high_{i}")
+        with stop_col:stop=st.number_input("Stop-loss ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_stop_{i}")
+        add=st.form_submit_button("＋ Add stock",type="primary")
+    if add:
+        if chosen==options[0]:st.error("Choose a stock from the name search.")
+        elif len(current["stocks"])>=1000:st.error("This tab already contains 1,000 stocks. Choose another tab.")
+        elif high<=0 or stop<=0:st.error("Enter a high and stop-loss above ₹0.")
+        else:
+            name,symbol=catalog[options.index(chosen)-1]
+            current["stocks"].append({"date":entry_date.isoformat(),"stock":name,"symbol":symbol,
+                                      "high":float(high),"stoploss":float(stop)})
+            if WL_save(watch):st.rerun()
+            else:st.error("Could not save on this server. Download a backup of the lists.")
+
+    if current["stocks"]:
+        st.markdown("##### Saved stocks and price movement")
+        symbols=tuple(sorted({row["symbol"] for row in current["stocks"]}))
+        with st.spinner("Loading latest available market closes..."):
+            quotes=WL_quotes(symbols)
+        st.dataframe(pd.DataFrame(WL_market_rows(current["stocks"],quotes)),hide_index=True,use_container_width=True)
+        choices=[f"{j+1}. {row['stock']} · {row['symbol']} · {row['date']}" for j,row in enumerate(current["stocks"])]
+        chosen_row=st.selectbox("Choose a saved stock to edit or delete",choices,key=f"wl_selected_row_{i}")
+        row_index=choices.index(chosen_row);row=current["stocks"][row_index]
+        with st.expander("✏️ Edit selected stock"):
+            with st.form(f"wl_edit_{i}_{row_index}"):
+                ec1,ec2,ec3=st.columns(3)
+                with ec1:new_date=st.date_input("Date",value=date.fromisoformat(row["date"]),key=f"wl_edit_date_{i}_{row_index}")
+                with ec2:new_high=st.number_input("High ₹",min_value=0.0,value=float(row.get("high") or 0),key=f"wl_edit_high_{i}_{row_index}")
+                with ec3:new_stop=st.number_input("Stop-loss ₹",min_value=0.0,value=float(row.get("stoploss") or 0),key=f"wl_edit_stop_{i}_{row_index}")
+                update=st.form_submit_button("Save changes")
+            if update:
+                if new_high<=0 or new_stop<=0:st.error("Enter a high and stop-loss above ₹0.")
                 else:
-                    watch["lists"][i]={"name":name.strip() or f"Watchlist {i+1}","stocks":newrows}
+                    row.update({"date":new_date.isoformat(),"high":float(new_high),"stoploss":float(new_stop)})
                     if WL_save(watch):st.rerun()
-                    else:st.error("Could not save on this server. Download a backup of the lists.")
-            if current["stocks"]:
-                st.markdown("##### Price movement")
-                st.dataframe(pd.DataFrame(WL_market_rows(current["stocks"],quotes)),hide_index=True,use_container_width=True)
-            else:st.info("This tab is empty. Add your first stock in the table above and save.")
+                    else:st.error("Could not save on this server.")
+        if st.button("🗑 Delete selected stock",key=f"wl_delete_{i}"):
+            current["stocks"].pop(row_index)
+            if WL_save(watch):st.rerun()
+            else:st.error("Could not save on this server.")
+    else:st.info("This tab is empty. Search for a stock above and click Add stock.")
 
 elif page=="🔥 Market Heatmap":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. Review an index group or the full NSE equity universe.</p></div>",unsafe_allow_html=True)
