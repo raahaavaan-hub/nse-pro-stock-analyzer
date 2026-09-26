@@ -1,5 +1,8 @@
 
 import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
+import json
+from datetime import date, datetime
+from pathlib import Path
 import requests
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
@@ -877,7 +880,7 @@ st.markdown("""
 """,unsafe_allow_html=True)
 
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
@@ -887,6 +890,77 @@ st.sidebar.link_button(
     use_container_width=True
 )
 st.sidebar.caption("Open the live app.py file directly when you want to update the website.")
+
+WATCHLIST_FILE=Path(__file__).with_name("watchlists.json")
+
+def WL_default():
+    return {"lists":[{"name":f"Watchlist {i}","stocks":[]} for i in range(1,11)]}
+
+def WL_normalize(raw):
+    source=raw.get("lists",[]) if isinstance(raw,dict) else []
+    result=WL_default()
+    for i in range(10):
+        entry=source[i] if i<len(source) and isinstance(source[i],dict) else {}
+        result["lists"][i]["name"]=str(entry.get("name") or f"Watchlist {i+1}").strip()[:32]
+        stocks=[]
+        for item in entry.get("stocks",[]) if isinstance(entry.get("stocks",[]),list) else []:
+            if not isinstance(item,dict):continue
+            symbol=str(item.get("symbol","")).strip().upper().removesuffix(".NS")
+            if not re.fullmatch(r"[A-Z0-9&.\-]{1,20}",symbol):continue
+            try:dt=date.fromisoformat(str(item.get("date",""))).isoformat()
+            except ValueError:dt=date.today().isoformat()
+            def level(key):
+                try:
+                    v=float(item.get(key))
+                    return v if np.isfinite(v) and v>0 else None
+                except (TypeError,ValueError):return None
+            stocks.append({"date":dt,"stock":str(item.get("stock") or symbol).strip()[:70],
+                           "symbol":symbol,"high":level("high"),"stoploss":level("stoploss")})
+        result["lists"][i]["stocks"]=stocks[:200]
+    return result
+
+def WL_load():
+    try:return WL_normalize(json.loads(WATCHLIST_FILE.read_text(encoding="utf-8")))
+    except (OSError,ValueError,TypeError):return WL_default()
+
+def WL_save(value):
+    try:
+        WATCHLIST_FILE.write_text(json.dumps(WL_normalize(value),ensure_ascii=False,indent=2),encoding="utf-8")
+        return True
+    except OSError:return False
+
+@st.cache_data(ttl=300,show_spinner=False)
+def WL_quotes(symbols):
+    out={}
+    for symbol in symbols:
+        try:
+            prices=yf.Ticker(symbol+".NS").history(period="5d",interval="1d",auto_adjust=False)
+            closes=prices["Close"].dropna()
+            if closes.empty:continue
+            latest=float(closes.iloc[-1]);previous=float(closes.iloc[-2]) if len(closes)>1 else None
+            if np.isfinite(latest):out[symbol]={"latest":latest,"previous":previous if previous and np.isfinite(previous) else None,
+                                                "asof":str(closes.index[-1].date())}
+        except Exception:continue
+    return out
+
+def WL_market_rows(stocks,quotes):
+    rows=[]
+    for item in stocks:
+        q=quotes.get(item["symbol"])
+        latest=q["latest"] if q else None
+        previous=q["previous"] if q else None
+        daily=(latest/previous-1)*100 if latest is not None and previous else None
+        high=item.get("high");stop=item.get("stoploss")
+        status="Price unavailable" if latest is None else ("🔴 At/below stop-loss" if stop and latest<=stop else
+               "🟢 At/above high" if high and latest>=high else "Between levels")
+        rows.append({"Date":item["date"],"Stock":item["stock"],"Symbol":item["symbol"],
+                     "High":f"₹{high:,.2f}" if high else "—","Stop-loss":f"₹{stop:,.2f}" if stop else "—",
+                     "Market close":f"₹{latest:,.2f}" if latest is not None else "—",
+                     "Move":f"{'▲' if daily>=0 else '▼'} {daily:+.2f}%" if daily is not None else "—",
+                     "Vs high":f"{(latest/high-1)*100:+.2f}%" if latest is not None and high else "—",
+                     "Vs stop-loss":f"{(latest/stop-1)*100:+.2f}%" if latest is not None and stop else "—",
+                     "Status":status,"Price date":q["asof"] if q else "—"})
+    return rows
 
 
 @st.cache_data(ttl=3600,show_spinner=False)
@@ -958,6 +1032,73 @@ if page=="🏠 Dashboard":
     for col,v in zip(c,vals):
         with col:
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
+
+elif page=="📌 Watchlist":
+    st.markdown("<div class='hero'><div class='eyebrow'>MY STOCK IDEAS</div><h1>📌 Watchlist</h1><p>Ten named lists. Enter your high and stop-loss; compare them with the latest available NSE daily close.</p></div>",unsafe_allow_html=True)
+    watch=WL_load()
+    a,b,c=st.columns([1,1,2])
+    with a:
+        st.download_button("⬇️ Back up watchlists",data=json.dumps(watch,ensure_ascii=False,indent=2),
+                           file_name="nse-pro-watchlists.json",mime="application/json",use_container_width=True)
+    with b:
+        uploaded=st.file_uploader("Restore backup",type="json",key="wl_restore")
+    with c:
+        if st.button("↻ Refresh market prices",use_container_width=True):
+            WL_quotes.clear();st.rerun()
+    if uploaded and st.button("Restore 10 lists from backup"):
+        try:
+            restored=WL_normalize(json.loads(uploaded.getvalue().decode("utf-8")))
+            if WL_save(restored):st.rerun()
+            else:st.error("Could not save the restored lists on this server.")
+        except (ValueError,UnicodeDecodeError):st.error("Choose a valid watchlist JSON backup.")
+    st.caption("Prices are the latest available daily close, cached for five minutes. They may lag the live market. Your high and stop-loss remain your own entries. Back up the lists before redeploying the app.")
+    symbols=tuple(sorted({row["symbol"] for part in watch["lists"] for row in part["stocks"]}))
+    quotes=WL_quotes(symbols) if symbols else {}
+    tabs=st.tabs([f"{i+1} · {part['name']}" for i,part in enumerate(watch["lists"])])
+    for i,tab in enumerate(tabs):
+        with tab:
+            current=watch["lists"][i]
+            st.markdown(f"#### {html.escape(current['name'])}")
+            st.caption("Add a row with its date, stock name, NSE symbol, high and stop-loss. Delete unwanted rows in the editor, then save.")
+            editable=pd.DataFrame([{
+                "Date":date.fromisoformat(row["date"]),"Stock name":row["stock"],"NSE symbol":row["symbol"],
+                "High":row["high"],"Stop-loss":row["stoploss"]
+            } for row in current["stocks"]],columns=["Date","Stock name","NSE symbol","High","Stop-loss"])
+            with st.form(f"wl_form_{i}"):
+                name=st.text_input("Edit this tab name",value=current["name"],max_chars=32,key=f"wl_name_{i}")
+                changed=st.data_editor(editable,num_rows="dynamic",hide_index=True,use_container_width=True,key=f"wl_editor_{i}",
+                    column_config={"Date":st.column_config.DateColumn("Date",format="DD MMM YYYY",default=date.today()),
+                                   "Stock name":st.column_config.TextColumn("Stock name"),
+                                   "NSE symbol":st.column_config.TextColumn("NSE symbol",help="Example: RELIANCE (without .NS)"),
+                                   "High":st.column_config.NumberColumn("High ₹",min_value=0.0,format="₹%.2f"),
+                                   "Stop-loss":st.column_config.NumberColumn("Stop-loss ₹",min_value=0.0,format="₹%.2f")})
+                save=st.form_submit_button("Save this watchlist",type="primary")
+            if save:
+                newrows=[];errors=[]
+                for rownum,row in enumerate(changed.to_dict("records"),1):
+                    raw_symbol=str(row.get("NSE symbol") or "").strip().upper().removesuffix(".NS")
+                    if not raw_symbol and not str(row.get("Stock name") or "").strip():continue
+                    if not re.fullmatch(r"[A-Z0-9&.\-]{1,20}",raw_symbol):
+                        errors.append(f"Row {rownum}: enter an NSE symbol such as RELIANCE.");continue
+                    raw_date=row.get("Date")
+                    try:day=pd.Timestamp(raw_date).date().isoformat() if pd.notna(raw_date) else date.today().isoformat()
+                    except (TypeError,ValueError):day=date.today().isoformat()
+                    def entered_level(key):
+                        try:
+                            value=float(row.get(key))
+                            return value if np.isfinite(value) and value>0 else None
+                        except (ValueError,TypeError):return None
+                    newrows.append({"date":day,"stock":str(row.get("Stock name") or raw_symbol).strip(),
+                                    "symbol":raw_symbol,"high":entered_level("High"),"stoploss":entered_level("Stop-loss")})
+                if errors:st.error(" ".join(errors))
+                else:
+                    watch["lists"][i]={"name":name.strip() or f"Watchlist {i+1}","stocks":newrows}
+                    if WL_save(watch):st.rerun()
+                    else:st.error("Could not save on this server. Download a backup of the lists.")
+            if current["stocks"]:
+                st.markdown("##### Price movement")
+                st.dataframe(pd.DataFrame(WL_market_rows(current["stocks"],quotes)),hide_index=True,use_container_width=True)
+            else:st.info("This tab is empty. Add your first stock in the table above and save.")
 
 elif page=="🔥 Market Heatmap":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. Review an index group or the full NSE equity universe.</p></div>",unsafe_allow_html=True)
