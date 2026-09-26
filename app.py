@@ -968,21 +968,18 @@ def WL_quotes(symbols):
 
 def WL_market_rows(stocks,quotes):
     rows=[]
-    for item in stocks:
+    for number,item in enumerate(stocks,1):
         q=quotes.get(item["symbol"])
         latest=q["latest"] if q else None
         previous=q["previous"] if q else None
         daily=(latest/previous-1)*100 if latest is not None and previous else None
         high=item.get("high");stop=item.get("stoploss")
-        status="Price unavailable" if latest is None else ("🔴 At/below stop-loss" if stop and latest<=stop else
-               "🟢 At/above high" if high and latest>=high else "Between levels")
-        rows.append({"Date":item["date"],"Stock":item["stock"],"Symbol":item["symbol"],
-                     "High":f"₹{high:,.2f}" if high else "—","Stop-loss":f"₹{stop:,.2f}" if stop else "—",
-                     "Market close":f"₹{latest:,.2f}" if latest is not None else "—",
-                     "Move":f"{'▲' if daily>=0 else '▼'} {daily:+.2f}%" if daily is not None else "—",
-                     "Vs high":f"{(latest/high-1)*100:+.2f}%" if latest is not None and high else "—",
-                     "Vs stop-loss":f"{(latest/stop-1)*100:+.2f}%" if latest is not None and stop else "—",
-                     "Status":status,"Price date":q["asof"] if q else "—"})
+        price=f"₹{latest:,.2f}" if latest is not None else "—"
+        if daily is not None:price+=f" {'▲' if daily>=0 else '▼'} {daily:+.2f}%"
+        rows.append({"Sl. No.":number,"Date":item["date"],"Stock Name":item["stock"],
+                     "Stop Loss":f"₹{stop:,.2f}" if stop else "—",
+                     "Current Market Price":price,
+                     "Target Price":f"₹{high:,.2f}" if high else "—"})
     return rows
 
 
@@ -1057,7 +1054,7 @@ if page=="🏠 Dashboard":
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
 elif page=="📌 Watchlist":
-    st.markdown("<div class='hero'><div class='eyebrow'>MY STOCK IDEAS</div><h1>📌 Watchlist</h1><p>Ten named lists. Enter your high and stop-loss; compare them with the latest available NSE daily close.</p></div>",unsafe_allow_html=True)
+    st.markdown("<div class='hero'><div class='eyebrow'>MY STOCK IDEAS</div><h1>📌 Watchlist</h1><p>Ten named lists. Enter your target price and stop loss; compare them with the latest available NSE daily close.</p></div>",unsafe_allow_html=True)
     watch=WL_load()
     a,b,c=st.columns([1,1,2])
     with a:
@@ -1074,7 +1071,7 @@ elif page=="📌 Watchlist":
             if WL_save(restored):st.rerun()
             else:st.error("Could not save the restored lists on this server.")
         except (ValueError,UnicodeDecodeError):st.error("Choose a valid watchlist JSON backup.")
-    st.caption("Prices are the latest available daily close, cached for five minutes. They may lag the live market. Your high and stop-loss remain your own entries. Back up the lists before redeploying the app.")
+    st.caption("Current Market Price shows the latest available daily close and its daily move, cached for five minutes. It may lag the live market. Your target price and stop loss remain your own entries. Back up the lists before redeploying the app.")
     labels=[f"{n+1} · {part['name']}" for n,part in enumerate(watch["lists"])]
     selected=st.radio("Your 10 watchlist tabs",labels,horizontal=True,key="wl_active_tab")
     i=labels.index(selected);current=watch["lists"][i]
@@ -1096,13 +1093,13 @@ elif page=="📌 Watchlist":
                             help="Click here and type the company name; matching NSE stocks appear in the dropdown.")
         when,high_col,stop_col=st.columns(3)
         with when:entry_date=st.date_input("Date",value=date.today(),key=f"wl_date_{i}")
-        with high_col:high=st.number_input("High ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_high_{i}")
-        with stop_col:stop=st.number_input("Stop-loss ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_stop_{i}")
+        with high_col:high=st.number_input("Target Price ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_high_{i}")
+        with stop_col:stop=st.number_input("Stop Loss ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_stop_{i}")
         add=st.form_submit_button("＋ Add stock",type="primary")
     if add:
         if chosen==options[0]:st.error("Choose a stock from the name search.")
         elif len(current["stocks"])>=1000:st.error("This tab already contains 1,000 stocks. Choose another tab.")
-        elif high<=0 or stop<=0:st.error("Enter a high and stop-loss above ₹0.")
+        elif high<=0 or stop<=0:st.error("Enter a target price and stop loss above ₹0.")
         else:
             name,symbol=catalog[options.index(chosen)-1]
             current["stocks"].append({"date":entry_date.isoformat(),"stock":name,"symbol":symbol,
@@ -1123,11 +1120,11 @@ elif page=="📌 Watchlist":
             with st.form(f"wl_edit_{i}_{row_index}"):
                 ec1,ec2,ec3=st.columns(3)
                 with ec1:new_date=st.date_input("Date",value=date.fromisoformat(row["date"]),key=f"wl_edit_date_{i}_{row_index}")
-                with ec2:new_high=st.number_input("High ₹",min_value=0.0,value=float(row.get("high") or 0),key=f"wl_edit_high_{i}_{row_index}")
-                with ec3:new_stop=st.number_input("Stop-loss ₹",min_value=0.0,value=float(row.get("stoploss") or 0),key=f"wl_edit_stop_{i}_{row_index}")
+                with ec2:new_high=st.number_input("Target Price ₹",min_value=0.0,value=float(row.get("high") or 0),key=f"wl_edit_high_{i}_{row_index}")
+                with ec3:new_stop=st.number_input("Stop Loss ₹",min_value=0.0,value=float(row.get("stoploss") or 0),key=f"wl_edit_stop_{i}_{row_index}")
                 update=st.form_submit_button("Save changes")
             if update:
-                if new_high<=0 or new_stop<=0:st.error("Enter a high and stop-loss above ₹0.")
+                if new_high<=0 or new_stop<=0:st.error("Enter a target price and stop loss above ₹0.")
                 else:
                     row.update({"date":new_date.isoformat(),"high":float(new_high),"stoploss":float(new_stop)})
                     if WL_save(watch):st.rerun()
