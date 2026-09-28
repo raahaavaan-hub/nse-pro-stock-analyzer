@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
-st.set_page_config(page_title="NSE Pro Market Terminal V14", page_icon="ðŸ“ˆ", layout="wide")
+st.set_page_config(page_title="NSE Pro Market Terminal V14", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -333,13 +333,13 @@ def bulk_snapshot(symbols_tuple,period="5y",force_refresh=False):
 
 SCREENERS={
 "52W Breakout Leaders":"Near 52W high + above SMA50",
-"RSI Pullback in Uptrend":"RSI 38â€“45 + above SMA50",
+"RSI Pullback in Uptrend":"RSI 38–45 + above SMA50",
 "Golden Cross Trend":"SMA50 > SMA200 + price above SMA50",
-"High Volume Breakout":"Volume ratio â‰¥1.3 + near 52W high",
+"High Volume Breakout":"Volume ratio ≥1.3 + near 52W high",
 "Darvas-Style Breakout":"Near 52W high + 1M strength",
 "CAN SLIM Technical":"Near highs + positive 1M/1Y + trend",
 "Consistent Uptrend":"12+ up days in 20 + positive 1M/3M",
-"Oversold Rebound Watch":"RSI â‰¤40 + price above SMA200"
+"Oversold Rebound Watch":"RSI ≤40 + price above SMA200"
 }
 
 
@@ -403,8 +403,8 @@ def classify_news(title):
 
 def target_from_text(text):
     pats=[
-        r"(?:target(?: price)?|price target|pt)\s*(?:of|at|to|:|-)?\s*(?:rs\.?|â‚¹)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
-        r"(?:rs\.?|â‚¹)\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:target|price target)"
+        r"(?:target(?: price)?|price target|pt)\s*(?:of|at|to|:|-)?\s*(?:rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"(?:rs\.?|₹)\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:target|price target)"
     ]
     for p in pats:
         m=re.search(p,text,re.I)
@@ -458,7 +458,7 @@ def broker_calls_from_news(broker, symbols, limit=20):
         status="Open"
         if cur and tgt: status="Target Hit" if cur>=tgt else "Below Target"
         ret=((cur/call)-1)*100 if cur and call else None
-        rows.append({"Broker":broker,"Symbol":sym or "â€”","Headline":n["title"],"Published":n["published"],
+        rows.append({"Broker":broker,"Symbol":sym or "—","Headline":n["title"],"Published":n["published"],
                      "Target":tgt,"Call Price":call,"Current":cur,"Return Since Call %":ret,
                      "Status":status,"Source":n["source"],"Link":n["link"]})
     return rows
@@ -534,7 +534,7 @@ def technical_checklist(x):
 def render_checklist(title,checks,score):
     st.markdown(f'<div class="score-panel"><div class="score-head"><h3>{title}</h3><div class="score-pill">{score:.1f}/10</div></div>',unsafe_allow_html=True)
     for c in checks:
-        icon="âœ…" if c["passed"] else ("âšª" if c["neutral"] else "âŒ")
+        icon="✅" if c["passed"] else ("⚪" if c["neutral"] else "❌")
         st.markdown('<div class="check-row">'+f'<span class="status">{icon}</span>'+f'<span>{html.escape(c["name"])}</span>'+f'<span class="value">{html.escape(str(c["value"]))}</span>'+'</div>',unsafe_allow_html=True)
     st.markdown('</div>',unsafe_allow_html=True)
 
@@ -712,7 +712,7 @@ def screener_shareholding(sym):
 def _short_business(text,limit=520):
     t=re.sub(r"\\s+"," ",str(text or "")).strip()
     if not t:return "Business summary unavailable from the current data source."
-    return t if len(t)<=limit else t[:limit].rsplit(" ",1)[0]+"â€¦"
+    return t if len(t)<=limit else t[:limit].rsplit(" ",1)[0]+"…"
 
 def _company_latest_news(sym,company_name,limit=3):
     q=(company_name or sym)+" stock India NSE"
@@ -759,16 +759,16 @@ def render_company_overview(sym,finfo):
     def rupee_crore(v):
         try:
             if v is None or not np.isfinite(float(v)): return "N/A"
-            return f"â‚¹{float(v)/1e7:,.0f} Cr"
+            return f"₹{float(v)/1e7:,.0f} Cr"
         except Exception:return "N/A"
     def compact_money(v):
         try:
             if v is None or not np.isfinite(float(v)): return "N/A"
             x=float(v)
-            if abs(x)>=1e12:return f"â‚¹{x/1e12:.2f} T"
-            if abs(x)>=1e9:return f"â‚¹{x/1e9:.2f} B"
-            if abs(x)>=1e7:return f"â‚¹{x/1e7:.0f} Cr"
-            return f"â‚¹{x:,.0f}"
+            if abs(x)>=1e12:return f"₹{x/1e12:.2f} T"
+            if abs(x)>=1e9:return f"₹{x/1e9:.2f} B"
+            if abs(x)>=1e7:return f"₹{x/1e7:.0f} Cr"
+            return f"₹{x:,.0f}"
         except Exception:return "N/A"
 
     market_cap=finfo.get("marketCap")
@@ -776,16 +776,16 @@ def render_company_overview(sym,finfo):
     employees=finfo.get("fullTimeEmployees")
     location=", ".join([x for x in [city,country] if x]) or "N/A"
 
-    st.markdown("## ðŸ¢ Company Overview")
+    st.markdown("## 🏢 Company Overview")
     st.markdown(
         '<div class="company-hero">'+
         f'<h2>{html.escape(company)}</h2>'+
-        f'<p><b>{html.escape(sector)}</b> Â· {html.escape(industry)} Â· {html.escape(location)}</p>'+
+        f'<p><b>{html.escape(sector)}</b> · {html.escape(industry)} · {html.escape(location)}</p>'+
         '</div>',unsafe_allow_html=True
     )
 
     # Identity / size
-    st.markdown("### ðŸ·ï¸ Business & Size")
+    st.markdown("### 🏷️ Business & Size")
     st.markdown(
         '<div class="company-grid">'+
         f'<div class="company-mini"><span>Sector</span><b>{html.escape(sector)}</b></div>'+
@@ -796,7 +796,7 @@ def render_company_overview(sym,finfo):
     )
 
     # Ownership
-    st.markdown("### ðŸ‘¥ Ownership")
+    st.markdown("### 👥 Ownership")
     st.markdown(
         '<div class="company-grid">'+
         f'<div class="company-mini"><span>Promoter Holding</span><b>{pctv(promoter)}</b></div>'+
@@ -815,7 +815,7 @@ def render_company_overview(sym,finfo):
     )
 
     # Valuation & profitability
-    st.markdown("### ðŸ’¹ Valuation & Profitability")
+    st.markdown("### 💹 Valuation & Profitability")
     st.markdown(
         '<div class="company-grid">'+
         f'<div class="company-mini"><span>Trailing P/E</span><b>{num(finfo.get("trailingPE"))}</b></div>'+
@@ -834,7 +834,7 @@ def render_company_overview(sym,finfo):
     )
 
     # Growth / margins
-    st.markdown("### ðŸ“ˆ Growth & Margins")
+    st.markdown("### 📈 Growth & Margins")
     st.markdown(
         '<div class="company-grid">'+
         f'<div class="company-mini"><span>Revenue Growth</span><b>{pct100(finfo.get("revenueGrowth"))}</b></div>'+
@@ -845,7 +845,7 @@ def render_company_overview(sym,finfo):
     )
 
     # Financial strength / trading characteristics
-    st.markdown("### ðŸ§¾ Financial Strength & Market Characteristics")
+    st.markdown("### 🧾 Financial Strength & Market Characteristics")
     emp_txt="N/A" if employees is None else f"{int(employees):,}"
     st.markdown(
         '<div class="company-grid">'+
@@ -865,22 +865,22 @@ def render_company_overview(sym,finfo):
     )
 
     st.markdown(
-        '<div class="company-section"><h3>ðŸ’¼ What business does it do?</h3>'+
+        '<div class="company-section"><h3>💼 What business does it do?</h3>'+
         f'<p style="color:#b9cde2;font-size:11px;line-height:1.7">{html.escape(business)}</p></div>',
         unsafe_allow_html=True
     )
 
     if key_title:
-        st.caption(f"Key management: {key_person} â€” {key_title}. Exact promoter names may require the official shareholding filing.")
+        st.caption(f"Key management: {key_person} — {key_title}. Exact promoter names may require the official shareholding filing.")
 
     news=_company_latest_news(sym,company,3)
-    st.markdown('<div class="company-section"><h3>ðŸ“° Latest News â€” Short</h3>',unsafe_allow_html=True)
+    st.markdown('<div class="company-section"><h3>📰 Latest News — Short</h3>',unsafe_allow_html=True)
     if news:
         for n in news:
             st.markdown(
                 '<div class="news-short">'+
                 f'<b>{html.escape(n.get("title",""))}</b>'+
-                f'<span>{html.escape(n.get("source",""))} Â· {html.escape(n.get("published",""))}</span>'+
+                f'<span>{html.escape(n.get("source",""))} · {html.escape(n.get("published",""))}</span>'+
                 '</div>',unsafe_allow_html=True
             )
     else:
@@ -1007,7 +1007,7 @@ _qp_page=st.query_params.get("page","")
 _qp_stock=st.query_params.get("stock","")
 if _qp_page=="pro" and _qp_stock:
     _stock=str(_qp_stock).upper().strip()
-    st.session_state["main_page"]="ðŸ§  Pro Analyzer"
+    st.session_state["main_page"]="🧠 Pro Analyzer"
     st.session_state["analyzer_symbol"]=_stock
     st.session_state["analyzer_period"]="1y"
     st.session_state["auto_analyze"]=True
@@ -1076,13 +1076,13 @@ st.markdown("""
 </style>
 """,unsafe_allow_html=True)
 
-st.sidebar.markdown("## ðŸ“ˆ NSE PRO")
-page=st.sidebar.radio("Open module",["ðŸ  Dashboard","ðŸ“Œ Watchlist","ðŸ”¥ Market Heatmap","ðŸ§  Pro Analyzer","ðŸš€ Swing Screeners","ðŸ“° Stock News","ðŸŽ¯ Brokerage Calls","ðŸŒ All NSE Performance","ðŸ¦ Institutional Watch","ðŸ’¾ Market Data Hub"],key="main_page")
+st.sidebar.markdown("## 📈 NSE PRO")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
 st.sidebar.link_button(
-    "ðŸ› ï¸ Open app.py on GitHub",
+    "🛠️ Open app.py on GitHub",
     "https://github.com/raahaavaan-hub/nse-pro-stock-analyzer/blob/main/app.py",
     use_container_width=True
 )
@@ -1171,12 +1171,12 @@ def WL_market_rows(stocks,quotes):
         previous=q["previous"] if q else None
         daily=(latest/previous-1)*100 if latest is not None and previous else None
         high=item.get("high");stop=item.get("stoploss")
-        price=f"â‚¹{latest:,.2f}" if latest is not None else "â€”"
-        if daily is not None:price+=f" {'â–²' if daily>=0 else 'â–¼'} {daily:+.2f}%"
+        price=f"₹{latest:,.2f}" if latest is not None else "—"
+        if daily is not None:price+=f" {'▲' if daily>=0 else '▼'} {daily:+.2f}%"
         rows.append({"Sl. No.":number,"Date":item["date"],"Stock Name":item["stock"],
-                     "Stop Loss":f"â‚¹{stop:,.2f}" if stop else "â€”",
+                     "Stop Loss":f"₹{stop:,.2f}" if stop else "—",
                      "Current Market Price":price,
-                     "Target Price":f"â‚¹{high:,.2f}" if high else "â€”"})
+                     "Target Price":f"₹{high:,.2f}" if high else "—"})
     return rows
 
 
@@ -1239,28 +1239,28 @@ def PA_nse_shareholding(symbol):
         if any(row[k] is not None for k in ["Promoters","FII","DII","Government","Public","Others"]):rows.append(row)
     return pd.DataFrame(rows).drop_duplicates().tail(12) if rows else pd.DataFrame()
 
-if page=="ðŸ  Dashboard":
+if page=="🏠 Dashboard":
     st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
     c=st.columns(4)
-    vals=[("ðŸ§  PRO ANALYZER","10 + 10 Score","Fundamental + Technical"),
-          ("ðŸš€ SWING LIBRARY",str(len(SCREENERS))+" Screeners","Momentum & Breakout"),
-          ("ðŸ“° MARKET INTEL","News + Calls","Events & Broker Targets"),
-          ("ðŸŒ NSE PERFORMANCE","1D â†’ 5Y","Automatic Market Data")]
+    vals=[("🧠 PRO ANALYZER","10 + 10 Score","Fundamental + Technical"),
+          ("🚀 SWING LIBRARY",str(len(SCREENERS))+" Screeners","Momentum & Breakout"),
+          ("📰 MARKET INTEL","News + Calls","Events & Broker Targets"),
+          ("🌐 NSE PERFORMANCE","1D → 5Y","Automatic Market Data")]
     for col,v in zip(c,vals):
         with col:
             st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
 
-elif page=="ðŸ“Œ Watchlist":
-    st.markdown("<div class='hero'><div class='eyebrow'>MY STOCK IDEAS</div><h1>ðŸ“Œ Watchlist</h1><p>Ten named lists. Enter your target price and stop loss; compare them with the latest available NSE daily close.</p></div>",unsafe_allow_html=True)
+elif page=="📌 Watchlist":
+    st.markdown("<div class='hero'><div class='eyebrow'>MY STOCK IDEAS</div><h1>📌 Watchlist</h1><p>Ten named lists. Enter your target price and stop loss; compare them with the latest available NSE daily close.</p></div>",unsafe_allow_html=True)
     watch=WL_load()
     a,b,c=st.columns([1,1,2])
     with a:
-        st.download_button("â¬‡ï¸ Back up watchlists",data=json.dumps(watch,ensure_ascii=False,indent=2),
+        st.download_button("⬇️ Back up watchlists",data=json.dumps(watch,ensure_ascii=False,indent=2),
                            file_name="nse-pro-watchlists.json",mime="application/json",use_container_width=True)
     with b:
         uploaded=st.file_uploader("Restore backup",type="json",key="wl_restore")
     with c:
-        if st.button("â†» Refresh market prices",use_container_width=True):
+        if st.button("↻ Refresh market prices",use_container_width=True):
             WL_quotes.clear();st.rerun()
     if uploaded and st.button("Restore 10 lists from backup"):
         try:
@@ -1269,10 +1269,10 @@ elif page=="ðŸ“Œ Watchlist":
             else:st.error("Could not save the restored lists on this server.")
         except (ValueError,UnicodeDecodeError):st.error("Choose a valid watchlist JSON backup.")
     st.caption("Current Market Price shows the latest available daily close and its daily move, cached for five minutes. It may lag the live market. Your target price and stop loss remain your own entries. Back up the lists before redeploying the app.")
-    labels=[f"{n+1} Â· {part['name']}" for n,part in enumerate(watch["lists"])]
+    labels=[f"{n+1} · {part['name']}" for n,part in enumerate(watch["lists"])]
     selected=st.radio("Your 10 watchlist tabs",labels,horizontal=True,key="wl_active_tab")
     i=labels.index(selected);current=watch["lists"][i]
-    st.markdown(f"#### {html.escape(current['name'])} Â· {len(current['stocks'])}/1,000 stocks")
+    st.markdown(f"#### {html.escape(current['name'])} · {len(current['stocks'])}/1,000 stocks")
     rename_col,save_col=st.columns([4,1])
     with rename_col:new_name=st.text_input("Edit this tab name",value=current["name"],max_chars=32,key=f"wl_name_{i}")
     with save_col:
@@ -1283,20 +1283,20 @@ elif page=="ðŸ“Œ Watchlist":
             else:st.error("Could not save on this server.")
 
     with st.form(f"wl_add_{i}",clear_on_submit=True):
-        st.markdown("##### ï¼‹ Add stock")
+        st.markdown("##### ＋ Add stock")
         catalog=WL_catalog()
-        options=["Search by company name or NSE symbol..."]+[f"{name} Â· {symbol}" for name,symbol in catalog]
+        options=["Search by company name or NSE symbol..."]+[f"{name} · {symbol}" for name,symbol in catalog]
         chosen=st.selectbox("Stock name",options,key=f"wl_stock_search_{i}",
                             help="Click here and type the company name; matching NSE stocks appear in the dropdown.")
         when,high_col,stop_col=st.columns(3)
         with when:entry_date=st.date_input("Date",value=date.today(),key=f"wl_date_{i}")
-        with high_col:high=st.number_input("Target Price â‚¹",min_value=0.0,step=0.05,value=0.0,key=f"wl_high_{i}")
-        with stop_col:stop=st.number_input("Stop Loss â‚¹",min_value=0.0,step=0.05,value=0.0,key=f"wl_stop_{i}")
-        add=st.form_submit_button("ï¼‹ Add stock",type="primary")
+        with high_col:high=st.number_input("Target Price ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_high_{i}")
+        with stop_col:stop=st.number_input("Stop Loss ₹",min_value=0.0,step=0.05,value=0.0,key=f"wl_stop_{i}")
+        add=st.form_submit_button("＋ Add stock",type="primary")
     if add:
         if chosen==options[0]:st.error("Choose a stock from the name search.")
         elif len(current["stocks"])>=1000:st.error("This tab already contains 1,000 stocks. Choose another tab.")
-        elif high<=0 or stop<=0:st.error("Enter a target price and stop loss above â‚¹0.")
+        elif high<=0 or stop<=0:st.error("Enter a target price and stop loss above ₹0.")
         else:
             name,symbol=catalog[options.index(chosen)-1]
             current["stocks"].append({"date":entry_date.isoformat(),"stock":name,"symbol":symbol,
@@ -1310,30 +1310,30 @@ elif page=="ðŸ“Œ Watchlist":
         with st.spinner("Loading latest available market closes..."):
             quotes=WL_quotes(symbols)
         st.dataframe(pd.DataFrame(WL_market_rows(current["stocks"],quotes)),hide_index=True,use_container_width=True)
-        choices=[f"{j+1}. {row['stock']} Â· {row['symbol']} Â· {row['date']}" for j,row in enumerate(current["stocks"])]
+        choices=[f"{j+1}. {row['stock']} · {row['symbol']} · {row['date']}" for j,row in enumerate(current["stocks"])]
         chosen_row=st.selectbox("Choose a saved stock to edit or delete",choices,key=f"wl_selected_row_{i}")
         row_index=choices.index(chosen_row);row=current["stocks"][row_index]
-        with st.expander("âœï¸ Edit selected stock"):
+        with st.expander("✏️ Edit selected stock"):
             with st.form(f"wl_edit_{i}_{row_index}"):
                 ec1,ec2,ec3=st.columns(3)
                 with ec1:new_date=st.date_input("Date",value=date.fromisoformat(row["date"]),key=f"wl_edit_date_{i}_{row_index}")
-                with ec2:new_high=st.number_input("Target Price â‚¹",min_value=0.0,value=float(row.get("high") or 0),key=f"wl_edit_high_{i}_{row_index}")
-                with ec3:new_stop=st.number_input("Stop Loss â‚¹",min_value=0.0,value=float(row.get("stoploss") or 0),key=f"wl_edit_stop_{i}_{row_index}")
+                with ec2:new_high=st.number_input("Target Price ₹",min_value=0.0,value=float(row.get("high") or 0),key=f"wl_edit_high_{i}_{row_index}")
+                with ec3:new_stop=st.number_input("Stop Loss ₹",min_value=0.0,value=float(row.get("stoploss") or 0),key=f"wl_edit_stop_{i}_{row_index}")
                 update=st.form_submit_button("Save changes")
             if update:
-                if new_high<=0 or new_stop<=0:st.error("Enter a target price and stop loss above â‚¹0.")
+                if new_high<=0 or new_stop<=0:st.error("Enter a target price and stop loss above ₹0.")
                 else:
                     row.update({"date":new_date.isoformat(),"high":float(new_high),"stoploss":float(new_stop)})
                     if WL_save(watch):st.rerun()
                     else:st.error("Could not save on this server.")
-        if st.button("ðŸ—‘ Delete selected stock",key=f"wl_delete_{i}"):
+        if st.button("🗑 Delete selected stock",key=f"wl_delete_{i}"):
             current["stocks"].pop(row_index)
             if WL_save(watch):st.rerun()
             else:st.error("Could not save on this server.")
     else:st.info("This tab is empty. Search for a stock above and click Add stock.")
 
-elif page=="ðŸ”¥ Market Heatmap":
-    st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>ðŸ”¥ Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. Review an index group or the full NSE equity universe.</p></div>",unsafe_allow_html=True)
+elif page=="🔥 Market Heatmap":
+    st.markdown("<div class='hero'><div class='eyebrow'>NSE STOCK HEATMAP</div><h1>🔥 Individual Stock Heatmap</h1><p>Green = stock up, red = stock down. Review an index group or the full NSE equity universe.</p></div>",unsafe_allow_html=True)
 
     f1,f2,f3,f4=st.columns([2,2,2,1])
     with f1:
@@ -1341,11 +1341,11 @@ elif page=="ðŸ”¥ Market Heatmap":
     with f2:
         heat_period=st.selectbox("Performance",["1 Day","1 Week","1 Month","3 Months","6 Months","1 Year","5 Years"],index=0,key="heat_period")
     with f3:
-        sort_mode=st.selectbox("Arrange",["ðŸŸ¢ Green first â†’ ðŸ”´ Red last","ðŸš€ Highest % first","ðŸ”» Lowest % first","A â†’ Z"],index=0,key="heat_sort_mode")
+        sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
     with f4:
-        heat_force_refresh=st.button("â†» Refresh",use_container_width=True,key="heat_stock_refresh")
+        heat_force_refresh=st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh")
 
-    move_filter=st.radio("Show",["All","ðŸŸ¢ Gainers","ðŸ”´ Losers","âšª Unchanged"],horizontal=True,key="heat_move_filter")
+    move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
 
     nifty50=["ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO","BAJFINANCE","BAJAJFINSV","BEL","BHARTIARTL","CIPLA","COALINDIA","DRREDDY","EICHERMOT","ETERNAL","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK","INFY","ITC","JIOFIN","JSWSTEEL","KOTAKBANK","LT","M&M","MARUTI","NESTLEIND","NTPC","ONGC","POWERGRID","RELIANCE","SBILIFE","SBIN","SHRIRAMFIN","SUNPHARMA","TATACONSUM","TATAMOTORS","TATASTEEL","TCS","TECHM","TITAN","TRENT","ULTRACEMCO","WIPRO"]
 
@@ -1374,7 +1374,7 @@ elif page=="ðŸ”¥ Market Heatmap":
             result.append((row["Symbol"],last,last-previous,change_pct))
         return result
 
-    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks Â· {heat_period}..."):
+    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
         rows=stock_heat_prices(syms,heat_period,force_refresh=heat_force_refresh)
 
     if not rows:
@@ -1382,23 +1382,23 @@ elif page=="ðŸ”¥ Market Heatmap":
     else:
         up=sum(x[3]>0 for x in rows); down=sum(x[3]<0 for x in rows); flat=len(rows)-up-down
         m=st.columns(4)
-        m[0].metric("Stocks loaded",len(rows));m[1].metric("ðŸŸ¢ Up",up);m[2].metric("ðŸ”´ Down",down);m[3].metric("âšª Flat",flat)
+        m[0].metric("Stocks loaded",len(rows));m[1].metric("🟢 Up",up);m[2].metric("🔴 Down",down);m[3].metric("⚪ Flat",flat)
         if universe_name=="NIFTY 50" and len(rows)<50:
             missing_symbols=[s for s in syms if s not in {r[0] for r in rows}]
             st.warning(f"Price provider returned {len(rows)}/50 NIFTY 50 stocks. Missing: {', '.join(missing_symbols)}")
 
-        if move_filter=="ðŸŸ¢ Gainers": rows=[x for x in rows if x[3]>0]
-        elif move_filter=="ðŸ”´ Losers": rows=[x for x in rows if x[3]<0]
-        elif move_filter=="âšª Unchanged": rows=[x for x in rows if x[3]==0]
+        if move_filter=="🟢 Gainers": rows=[x for x in rows if x[3]>0]
+        elif move_filter=="🔴 Losers": rows=[x for x in rows if x[3]<0]
+        elif move_filter=="⚪ Unchanged": rows=[x for x in rows if x[3]==0]
 
-        if sort_mode=="ðŸŸ¢ Green first â†’ ðŸ”´ Red last":
+        if sort_mode=="🟢 Green first → 🔴 Red last":
             rows=sorted(rows,key=lambda x:(x[3]<=0,-x[3] if x[3]>0 else x[3]))
             gainers=sorted([x for x in rows if x[3]>0],key=lambda x:x[3],reverse=True)
             flatrows=[x for x in rows if x[3]==0]
             losers=sorted([x for x in rows if x[3]<0],key=lambda x:x[3],reverse=True)
             rows=gainers+flatrows+losers
-        elif sort_mode=="ðŸš€ Highest % first": rows=sorted(rows,key=lambda x:x[3],reverse=True)
-        elif sort_mode=="ðŸ”» Lowest % first": rows=sorted(rows,key=lambda x:x[3])
+        elif sort_mode=="🚀 Highest % first": rows=sorted(rows,key=lambda x:x[3],reverse=True)
+        elif sort_mode=="🔻 Lowest % first": rows=sorted(rows,key=lambda x:x[3])
         else: rows=sorted(rows,key=lambda x:x[0])
 
         def hc(x):
@@ -1414,12 +1414,12 @@ elif page=="ðŸ”¥ Market Heatmap":
         for s,last,ch,pct in rows:
             # Query parameter lets a heatmap tile deep-link into Pro Analyzer.
             href=f"?page=pro&stock={s}"
-            cards.append(f"<a href='{href}' target='_self' style='text-decoration:none;color:white'><div class='nse-heat-card' style='background:{hc(pct)};min-height:82px;cursor:pointer'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>â‚¹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div></a>")
-        st.caption(f"{universe_name} Â· {len(rows):,} displayed Â· {heat_period} performance Â· click a stock to open Pro Analyzer")
+            cards.append(f"<a href='{href}' target='_self' style='text-decoration:none;color:white'><div class='nse-heat-card' style='background:{hc(pct)};min-height:82px;cursor:pointer'><div class='nse-heat-name' style='font-size:11px'>{html.escape(s)}</div><div class='nse-heat-value'>₹{last:,.2f}</div><div class='nse-heat-change'>{ch:+,.2f} &nbsp; {pct:+.2f}%</div></div></a>")
+        st.caption(f"{universe_name} · {len(rows):,} displayed · {heat_period} performance · click a stock to open Pro Analyzer")
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
-elif page=="ðŸ§  Pro Analyzer":
-    st.markdown("<div class='hero'><div class='eyebrow'>COMPLETE STOCK RESEARCH</div><h1>ðŸ§  Pro Analyzer</h1><p>Fundamentals + financial statements + ownership + technicals + swing setup in one page.</p></div>",unsafe_allow_html=True)
+elif page=="🧠 Pro Analyzer":
+    st.markdown("<div class='hero'><div class='eyebrow'>COMPLETE STOCK RESEARCH</div><h1>🧠 Pro Analyzer</h1><p>Fundamentals + financial statements + ownership + technicals + swing setup in one page.</p></div>",unsafe_allow_html=True)
 
     # Heatmap deep-link preloads this key before sidebar widgets are created.
     _default_symbol=str(st.session_state.get("analyzer_symbol","RELIANCE")).replace(".NS","").upper()
@@ -1431,7 +1431,7 @@ elif page=="ðŸ§  Pro Analyzer":
         symbol=st.selectbox("NSE stock",_all_symbols,index=_all_symbols.index(_default_symbol),key="pro_analyzer_stock")
     with pa2:
         st.write("")
-        analyze=st.button("ðŸ”Ž Analyze",use_container_width=True,key="pro_analyze_btn")
+        analyze=st.button("🔎 Analyze",use_container_width=True,key="pro_analyze_btn")
     ticker=symbol+".NS"
 
     @st.cache_data(ttl=900,show_spinner=False)
@@ -1459,10 +1459,10 @@ elif page=="ðŸ§  Pro Analyzer":
         v=PA_num(x)
         if v is None:return "N/A"
         av=abs(v)
-        if av>=1e12:return f"â‚¹{v/1e12:,.2f}T"
-        if av>=1e7:return f"â‚¹{v/1e7:,.2f} Cr"
-        if av>=1e5:return f"â‚¹{v/1e5:,.2f}L"
-        return f"â‚¹{v:,.2f}"
+        if av>=1e12:return f"₹{v/1e12:,.2f}T"
+        if av>=1e7:return f"₹{v/1e7:,.2f} Cr"
+        if av>=1e5:return f"₹{v/1e5:,.2f}L"
+        return f"₹{v:,.2f}"
 
     def PA_pct(x,decimal=True):
         v=PA_num(x)
@@ -1491,7 +1491,7 @@ elif page=="ðŸ§  Pro Analyzer":
         x=x.iloc[:,:6]
         def fmt(v):
             try:
-                if pd.isna(v):return "â€”"
+                if pd.isna(v):return "—"
                 if abs(float(v))>=1e7:return f"{float(v)/1e7:,.2f} Cr"
                 return f"{float(v):,.2f}"
             except:return str(v)
@@ -1507,10 +1507,10 @@ elif page=="ðŸ§  Pro Analyzer":
     pct=(change/prev*100) if change is not None and prev else None
     name=PA_val(info,"longName","shortName") or symbol
 
-    st.markdown(f"## {name}  Â·  NSE: {symbol}")
-    st.link_button("ðŸ“Š Open this stock in Screener", f"https://www.screener.in/company/{symbol}/", use_container_width=False)
+    st.markdown(f"## {name}  ·  NSE: {symbol}")
+    st.link_button("📊 Open this stock in Screener", f"https://www.screener.in/company/{symbol}/", use_container_width=False)
     if last is not None:
-        st.markdown(f"### â‚¹{last:,.2f} &nbsp; <span style='color:{'#22c55e' if (pct or 0)>=0 else '#ef4444'}'>{pct:+.2f}%</span>" if pct is not None else f"### â‚¹{last:,.2f}",unsafe_allow_html=True)
+        st.markdown(f"### ₹{last:,.2f} &nbsp; <span style='color:{'#22c55e' if (pct or 0)>=0 else '#ef4444'}'>{pct:+.2f}%</span>" if pct is not None else f"### ₹{last:,.2f}",unsafe_allow_html=True)
 
     tabs=st.tabs(["Overview","Chart","Analysis","Peers","Quarters","Profit & Loss","Balance Sheet","Cash Flow","Ratios","Investors","News"])
 
@@ -1527,7 +1527,7 @@ elif page=="ðŸ§  Pro Analyzer":
             ("ROE",PA_pct(PA_val(info,"returnOnEquity"))),
             ("ROA",PA_pct(PA_val(info,"returnOnAssets"))),
             ("Debt / Equity",f"{PA_num(PA_val(info,'debtToEquity')):.2f}" if PA_num(PA_val(info,'debtToEquity')) is not None else "N/A"),
-            ("EPS",f"â‚¹{PA_num(PA_val(info,'trailingEps')):.2f}" if PA_num(PA_val(info,'trailingEps')) is not None else "N/A"),
+            ("EPS",f"₹{PA_num(PA_val(info,'trailingEps')):.2f}" if PA_num(PA_val(info,'trailingEps')) is not None else "N/A"),
         ]
         for row in range(0,len(vals),4):
             cs=st.columns(4)
@@ -1569,14 +1569,14 @@ elif page=="ðŸ§  Pro Analyzer":
         if PA_num(PA_val(info,"dividendYield")) in (None,0):cons.append("No regular dividend yield is currently reported by the provider.")
         c1,c2=st.columns(2)
         with c1:
-            st.markdown("#### âœ… Strengths")
+            st.markdown("#### ✅ Strengths")
             if pros:
-                for x in pros:st.write("â€¢",x)
+                for x in pros:st.write("•",x)
             else:st.write("No rule-based strength triggered from available fields.")
         with c2:
-            st.markdown("#### âš ï¸ Risks / Watch")
+            st.markdown("#### ⚠️ Risks / Watch")
             if cons:
-                for x in cons:st.write("â€¢",x)
+                for x in cons:st.write("•",x)
             else:st.write("No rule-based risk triggered from available fields.")
         st.caption("These are rule-based observations from available financial fields, not a buy/sell recommendation.")
 
@@ -1649,7 +1649,7 @@ elif page=="ðŸ§  Pro Analyzer":
             for rr in disp.index:
                 for cc in disp.columns:
                     v=disp.loc[rr,cc]
-                    if pd.isna(v):disp.loc[rr,cc]="â€”"
+                    if pd.isna(v):disp.loc[rr,cc]="—"
                     elif rr=="Shareholders":disp.loc[rr,cc]=f"{int(float(v)):,}"
                     else:disp.loc[rr,cc]=f"{float(v):.2f}%"
             st.dataframe(disp,use_container_width=True)
@@ -1659,7 +1659,7 @@ elif page=="ðŸ§  Pro Analyzer":
                     a=latest.get(col);b=previous.get(col)
                     if pd.notna(a) and pd.notna(b):
                         d=float(a)-float(b)
-                        st.write(f"{'ðŸŸ¢' if d>0 else 'ðŸ”´' if d<0 else 'âšª'} **{label}:** {d:+.2f} percentage points")
+                        st.write(f"{'🟢' if d>0 else '🔴' if d<0 else '⚪'} **{label}:** {d:+.2f} percentage points")
             st.caption("Source: NSE corporate shareholding-pattern feed.")
         else:
             st.warning("NSE quarterly shareholding data is temporarily unavailable for this symbol. Showing fallback holder data.")
@@ -1688,11 +1688,11 @@ elif page=="ðŸ§  Pro Analyzer":
             if provider:st.caption(provider)
             if summary:st.write(summary)
 
-elif page=="ðŸš€ Swing Screeners":
-    st.markdown("## ðŸš€ Famous Swing-Trading Screener Library")
+elif page=="🚀 Swing Screeners":
+    st.markdown("## 🚀 Famous Swing-Trading Screener Library")
     st.caption("Rule-based candidates only. The app now penalizes extreme overbought conditions instead of blindly rewarding momentum.")
 
-    if st.button("ðŸ† Build Top Swing Picks Today", type="primary", key="top_picks"):
+    if st.button("🏆 Build Top Swing Picks Today", type="primary", key="top_picks"):
         syms=universe()[:500]
         with st.spinner("Scanning 500 liquid-listed symbols for technical setups..."):
             snap=bulk_snapshot(tuple(syms),"1y")
@@ -1712,7 +1712,7 @@ elif page=="ðŸš€ Swing Screeners":
 
     top=st.session_state.get("top_picks_today")
     if isinstance(top,pd.DataFrame) and not top.empty:
-        st.markdown("### ðŸ† Top Swing Picks Today")
+        st.markdown("### 🏆 Top Swing Picks Today")
         st.markdown('<div class="clean-table-note">Scored from trend, breakout, recent returns, volume and RSI risk filters.</div>',unsafe_allow_html=True)
         cols=st.columns(3)
         for i,(_,r) in enumerate(top.iterrows()):
@@ -1722,33 +1722,33 @@ elif page=="ðŸš€ Swing Screeners":
                     f'<a class="pick-card pick-card-link" href="?page=pro&stock={r["Symbol"]}" target="_self">'
                     f'<span class="pick-badge">Score {int(r["Score"])}</span>'
                     f'<b>{r["Symbol"]}</b>'
-                    f'<span>â‚¹{r["Latest"]:.2f}</span>'
-                    f'<small>1W {r["1W %"]:+.2f}% Â· 1M {r["1M %"]:+.2f}% Â· RSI {r["RSI14"]:.1f}</small>'
+                    f'<span>₹{r["Latest"]:.2f}</span>'
+                    f'<small>1W {r["1W %"]:+.2f}% · 1M {r["1M %"]:+.2f}% · RSI {r["RSI14"]:.1f}</small>'
                     f'<small>{risk}</small>'
-                    f'<small style="margin-top:10px;color:#67e8f9;font-weight:900">Click card â†’ Full Pro Analysis</small>'
+                    f'<small style="margin-top:10px;color:#67e8f9;font-weight:900">Click card → Full Pro Analysis</small>'
                     f'</a>',
                     unsafe_allow_html=True
                 )
 
     name=st.selectbox("Preset",list(SCREENERS));st.info(SCREENERS[name]);size=st.selectbox("Universe size",[100,250,500,1000,"All"],index=1)
-    if st.button("ðŸ”¥ Run Screener",type="primary"):
+    if st.button("🔥 Run Screener",type="primary"):
         syms=universe();syms=syms if size=="All" else syms[:int(size)]
         with st.spinner("Downloading market history in batches..."):snap=bulk_snapshot(tuple(syms),"1y");res=run_screen(snap,name)
         res=clean_display(res)
         st.dataframe(res,use_container_width=True,height=600,hide_index=True)
         if not res.empty:
             chosen_symbol=st.selectbox("Open a matched stock in Pro Analyzer",res["Symbol"].astype(str).tolist(),key="screen_result_symbol")
-            if st.button("ðŸ§  Open Selected Stock Analysis",type="primary",use_container_width=True):
+            if st.button("🧠 Open Selected Stock Analysis",type="primary",use_container_width=True):
                 st.session_state["analyzer_symbol"]=chosen_symbol
                 st.session_state["analyzer_period"]="1y"
                 st.session_state["auto_analyze"]=True
-                st.session_state["pending_page"]="ðŸ§  Pro Analyzer"
+                st.session_state["pending_page"]="🧠 Pro Analyzer"
                 st.rerun()
-        st.download_button("â¬‡ï¸ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
+        st.download_button("⬇️ Download CSV",res.to_csv(index=False).encode(),name.replace(" ","_")+".csv","text/csv")
 
 
-elif page=="ðŸ“° Stock News":
-    st.markdown("<div class='hero'><div class='eyebrow'>FRESH CATALYST RADAR</div><h1>ðŸ“° Stock News & Event Radar</h1><p>Fresh Indian stock-market catalysts, newest first. General scan works even when the stock box is empty.</p></div>",unsafe_allow_html=True)
+elif page=="📰 Stock News":
+    st.markdown("<div class='hero'><div class='eyebrow'>FRESH CATALYST RADAR</div><h1>📰 Stock News & Event Radar</h1><p>Fresh Indian stock-market catalysts, newest first. General scan works even when the stock box is empty.</p></div>",unsafe_allow_html=True)
 
     @st.cache_data(ttl=180,show_spinner=False)
     def NEWS_rss(query,limit=100):
@@ -1776,18 +1776,18 @@ elif page=="ðŸ“° Stock News":
     def NEWS_tag(title):
         x=title.lower()
         rules=[
-          ("ðŸ”´ Block/Bulk Deal",["block deal","bulk deal","stake sale","stake sell","offload"]),
-          ("ðŸŸ¢ Order Win",["bags order","wins order","order win","receives order","contract win","letter of award","letter of acceptance"]),
-          ("ðŸŸ¢ Government/Regulatory",["government approval","government approves","cabinet approval","cabinet approves","ministry approval","regulatory approval","sebi approval","rbi approval","dcgi approval"]),
-          ("ðŸŸ¢ Corporate Action",["buyback","bonus issue","stock split","dividend","rights issue"]),
-          ("ðŸŸ£ Results",["quarterly results","q1 results","q2 results","q3 results","q4 results","profit rises","profit jumps","profit falls"]),
-          ("ðŸŸ¡ M&A / Stake",["acquisition","acquires","merger","demerger","buys stake","stake purchase","mou"]),
-          ("ðŸ”µ Brokerage",["brokerage","target price","jefferies","motilal oswal","nomura","ubs","goldman sachs","morgan stanley","upgrade","downgrade"]),
-          ("âš ï¸ Legal/Negative",["penalty","fraud","probe","investigation","insolvency","default","court order","restriction"]),
+          ("🔴 Block/Bulk Deal",["block deal","bulk deal","stake sale","stake sell","offload"]),
+          ("🟢 Order Win",["bags order","wins order","order win","receives order","contract win","letter of award","letter of acceptance"]),
+          ("🟢 Government/Regulatory",["government approval","government approves","cabinet approval","cabinet approves","ministry approval","regulatory approval","sebi approval","rbi approval","dcgi approval"]),
+          ("🟢 Corporate Action",["buyback","bonus issue","stock split","dividend","rights issue"]),
+          ("🟣 Results",["quarterly results","q1 results","q2 results","q3 results","q4 results","profit rises","profit jumps","profit falls"]),
+          ("🟡 M&A / Stake",["acquisition","acquires","merger","demerger","buys stake","stake purchase","mou"]),
+          ("🔵 Brokerage",["brokerage","target price","jefferies","motilal oswal","nomura","ubs","goldman sachs","morgan stanley","upgrade","downgrade"]),
+          ("⚠️ Legal/Negative",["penalty","fraud","probe","investigation","insolvency","default","court order","restriction"]),
         ]
         for lab,keys in rules:
             if any(k in x for k in keys):return lab
-        return "ðŸ“° Market/Company News"
+        return "📰 Market/Company News"
 
     def NEWS_age(dt):
         from datetime import datetime,timezone
@@ -1843,7 +1843,7 @@ elif page=="ðŸ“° Stock News":
         z["tag"]=tag;items.append(z)
         if len(items)>=count:break
 
-    st.markdown(f"### Latest market-moving news Â· {len(items)} headlines")
+    st.markdown(f"### Latest market-moving news · {len(items)} headlines")
     st.caption(f"Showing only items published inside the selected {fresh} window, newest first. Event hints are not price predictions.")
     if not items:
         st.warning("No matching headlines were found for this exact filter. Try All or 7 Days. The page no longer shows old articles just to fill the list.")
@@ -1851,20 +1851,20 @@ elif page=="ðŸ“° Stock News":
         title=z["title"].replace("<","&lt;").replace(">","&gt;")
         hint=NEWS_hint(z["tag"],z["title"])
         st.markdown(f"""<div style="border:1px solid rgba(120,160,210,.28);border-radius:14px;padding:14px 16px;margin:9px 0;background:rgba(15,42,72,.38)">
-        <div style="font-size:12px;font-weight:800">{z['tag']} &nbsp; â€¢ &nbsp; {hint}</div>
+        <div style="font-size:12px;font-weight:800">{z['tag']} &nbsp; • &nbsp; {hint}</div>
         <div style="font-size:17px;font-weight:800;line-height:1.35;margin-top:5px">{title}</div>
-        <div style="opacity:.72;font-size:13px;margin-top:6px">{z['source']} &nbsp; â€¢ &nbsp; {NEWS_age(z['dt'])}</div>
-        <div style="margin-top:8px"><a href="{z['link']}" target="_blank">Open full story â†—</a></div></div>""",unsafe_allow_html=True)
+        <div style="opacity:.72;font-size:13px;margin-top:6px">{z['source']} &nbsp; • &nbsp; {NEWS_age(z['dt'])}</div>
+        <div style="margin-top:8px"><a href="{z['link']}" target="_blank">Open full story ↗</a></div></div>""",unsafe_allow_html=True)
 
     st.markdown("### What this radar is meant to catch")
-    st.write("Block/bulk deals â€¢ large order wins â€¢ government/regulatory approvals â€¢ results â€¢ buybacks/dividends â€¢ acquisitions â€¢ brokerage actions â€¢ material company events")
-elif page=="ðŸŽ¯ Brokerage Calls":
-    st.markdown("## ðŸŽ¯ Brokerage Calls & Target Tracker")
+    st.write("Block/bulk deals • large order wins • government/regulatory approvals • results • buybacks/dividends • acquisitions • brokerage actions • material company events")
+elif page=="🎯 Brokerage Calls":
+    st.markdown("## 🎯 Brokerage Calls & Target Tracker")
     st.caption("Tracks public brokerage-call headlines, target prices when detectable, current price and return since the call date.")
     brokers=["Jefferies","Motilal Oswal","ICICI Securities","HDFC Securities","Axis Securities","Morgan Stanley","Goldman Sachs","CLSA","Nomura","JM Financial"]
     chosen=st.multiselect("Brokerages",brokers,default=["Jefferies","Motilal Oswal"])
     limit=st.selectbox("Headlines per brokerage",[10,20,30],index=1)
-    if st.button("âš¡ Refresh Brokerage Calls",type="primary"):
+    if st.button("⚡ Refresh Brokerage Calls",type="primary"):
         syms=universe()
         allrows=[]
         with st.spinner("Searching brokerage calls and comparing market prices..."):
@@ -1883,14 +1883,14 @@ elif page=="ðŸŽ¯ Brokerage Calls":
         with k3: st.metric("Below target",int((df["Status"]=="Below Target").sum()))
         show=["Broker","Symbol","Published","Target","Call Price","Current","Return Since Call %","Status","Source","Headline"]
         st.dataframe(df[show],use_container_width=True,height=620,hide_index=True)
-        st.download_button("â¬‡ï¸ Download Brokerage Calls CSV",df.to_csv(index=False).encode(),"brokerage_calls.csv","text/csv")
+        st.download_button("⬇️ Download Brokerage Calls CSV",df.to_csv(index=False).encode(),"brokerage_calls.csv","text/csv")
         st.info("Target and symbol are parsed only when clearly present in public news text. Blank means not confidently detected.")
 
 
-elif page=="ðŸŒ All NSE Performance":
-    st.markdown("<div class='hero'><div class='eyebrow'>NSE PERFORMANCE</div><h1>ðŸŒ All NSE Performance</h1><p>Start with market statistics, then explore heat maps, then choose Classic Table or Smart Scanner.</p></div>",unsafe_allow_html=True)
+elif page=="🌐 All NSE Performance":
+    st.markdown("<div class='hero'><div class='eyebrow'>NSE PERFORMANCE</div><h1>🌐 All NSE Performance</h1><p>Start with market statistics, then explore heat maps, then choose Classic Table or Smart Scanner.</p></div>",unsafe_allow_html=True)
 
-    st.markdown("## ðŸ“Š Market Statistics")
+    st.markdown("## 📊 Market Statistics")
     official_stats=nse_market_statistics()
 
     if official_stats.get("source")=="NSE":
@@ -1903,23 +1903,23 @@ elif page=="ðŸŒ All NSE Performance":
         upper_circuit=official_stats.get("upper",0)
         lower_circuit=official_stats.get("lower",0)
         as_on=official_stats.get("as_on","Latest NSE update")
-        st.caption(f"Official NSE Market Statistics Â· {as_on}")
+        st.caption(f"Official NSE Market Statistics · {as_on}")
     else:
         st.warning("Official NSE Market Statistics could not be fetched right now. I am not showing an estimated substitute, so the numbers will not mislead you.")
         total_traded=advances=declines=unchanged=high52=low52=upper_circuit=lower_circuit=0
 
     s1,s2,s3,s4=st.columns(4)
-    s1.metric("Stock Traded",f"{total_traded:,}" if total_traded else "â€”")
-    s2.metric("Advances",f"{advances:,}" if advances else "â€”")
-    s3.metric("Declines",f"{declines:,}" if declines else "â€”")
-    s4.metric("Unchanged",f"{unchanged:,}" if unchanged else "â€”")
+    s1.metric("Stock Traded",f"{total_traded:,}" if total_traded else "—")
+    s2.metric("Advances",f"{advances:,}" if advances else "—")
+    s3.metric("Declines",f"{declines:,}" if declines else "—")
+    s4.metric("Unchanged",f"{unchanged:,}" if unchanged else "—")
     t1,t2,t3,t4=st.columns(4)
-    t1.metric("52 Week High",f"{high52:,}" if high52 else "â€”")
-    t2.metric("52 Week Low",f"{low52:,}" if low52 else "â€”")
-    t3.metric("Upper Circuit",f"{upper_circuit:,}" if upper_circuit else "â€”")
-    t4.metric("Lower Circuit",f"{lower_circuit:,}" if lower_circuit else "â€”")
+    t1.metric("52 Week High",f"{high52:,}" if high52 else "—")
+    t2.metric("52 Week Low",f"{low52:,}" if low52 else "—")
+    t3.metric("Upper Circuit",f"{upper_circuit:,}" if upper_circuit else "—")
+    t4.metric("Lower Circuit",f"{lower_circuit:,}" if lower_circuit else "—")
 
-    st.markdown("## ðŸŸ© Heat Map")
+    st.markdown("## 🟩 Heat Map")
     heat_mode=st.radio("Choose heat map",["Broad Market Indices","Sectoral Indices"],horizontal=True,key="heat_mode")
 
     def heat_color(v):
@@ -1954,14 +1954,14 @@ elif page=="ðŸŒ All NSE Performance":
     if not tile_rows:
         st.warning("NSE index feed is temporarily unavailable.")
     else:
-        st.caption(f"Official NSE index feed Â· {len(tile_rows)} {heat_mode.lower()} shown")
+        st.caption(f"Official NSE index feed · {len(tile_rows)} {heat_mode.lower()} shown")
         cards=[]
         for row in tile_rows:
             name=row.get("name","")
             val=row.get("last")
             chg=row.get("pct")
-            val_txt="â€”" if val is None else f"{val:,.2f}"
-            chg_txt="â€”" if chg is None else f"{chg:+.2f}%"
+            val_txt="—" if val is None else f"{val:,.2f}"
+            chg_txt="—" if chg is None else f"{chg:+.2f}%"
             cards.append(
                 f"<div class='nse-heat-card' style='background:{heat_color(chg)}'>"
                 f"<div class='nse-heat-name'>{html.escape(name)}</div>"
@@ -1971,8 +1971,8 @@ elif page=="ðŸŒ All NSE Performance":
             )
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
-    st.markdown("## ðŸ“‹ Stock Performance")
-    view=st.radio("Choose view",["ðŸ“‹ Classic Table (Excel Style)","âš¡ Smart Scanner"],horizontal=True,key="allnse_view")
+    st.markdown("## 📋 Stock Performance")
+    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner"],horizontal=True,key="allnse_view")
 
     universe_group=st.selectbox(
         "Universe",
@@ -1989,15 +1989,15 @@ elif page=="ðŸŒ All NSE Performance":
     elif universe_group=="NIFTY Smallcap": use_syms=syms[250:500]
     else: use_syms=syms
 
-    if view=="ðŸ“‹ Classic Table (Excel Style)":
-        st.markdown("### ðŸ“‹ Classic Performance Table")
+    if view=="📋 Classic Table (Excel Style)":
+        st.markdown("### 📋 Classic Performance Table")
         c1,c2,c3=st.columns(3)
         history=c1.selectbox("History",["1y","2y","5y"],index=2,key="classic_history")
         sort_by=c2.selectbox("Sort by",["Symbol","Brokerage Call","Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume","Volume Ratio","Up Days 20"],index=2,key="classic_sort")
-        order_options=["A â†’ Z","Z â†’ A"] if sort_by in ["Symbol","Brokerage Call"] else ["Largest â†’ Smallest","Smallest â†’ Largest"]
+        order_options=["A → Z","Z → A"] if sort_by in ["Symbol","Brokerage Call"] else ["Largest → Smallest","Smallest → Largest"]
         order=c3.selectbox("Order",order_options,key="classic_order")
 
-        if st.button("ðŸ“Š Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
+        if st.button("📊 Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
             with st.spinner(f"Loading {len(use_syms):,} stocks..."):
                 st.session_state["classic_df"]=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
 
@@ -2005,12 +2005,12 @@ elif page=="ðŸŒ All NSE Performance":
         if isinstance(classic,pd.DataFrame) and not classic.empty:
             d=classic.copy()
             if sort_by=="Symbol":
-                d=d.sort_values("Symbol",ascending=(order=="A â†’ Z"),na_position="last")
+                d=d.sort_values("Symbol",ascending=(order=="A → Z"),na_position="last")
             elif sort_by!="Brokerage Call" and sort_by in d.columns:
                 d[sort_by]=pd.to_numeric(d[sort_by],errors="coerce")
-                d=d.sort_values(sort_by,ascending=(order=="Smallest â†’ Largest"),na_position="last")
+                d=d.sort_values(sort_by,ascending=(order=="Smallest → Largest"),na_position="last")
 
-            show_brokerage=st.checkbox("ðŸ”µ Check recent public brokerage calls",value=True,key="classic_brokerage")
+            show_brokerage=st.checkbox("🔵 Check recent public brokerage calls",value=True,key="classic_brokerage")
             if show_brokerage:
                 with st.spinner("Checking recent brokerage-call headlines..."):
                     broker_map=brokerage_tags_for_symbols(tuple(d["Symbol"].astype(str).tolist()))
@@ -2033,10 +2033,10 @@ elif page=="ðŸŒ All NSE Performance":
 
             # Re-apply selected sort after brokerage tagging/filtering.
             if sort_by in ["Symbol","Brokerage Call"]:
-                d=d.sort_values(sort_by,ascending=(order=="A â†’ Z"),na_position="last")
+                d=d.sort_values(sort_by,ascending=(order=="A → Z"),na_position="last")
             elif sort_by in d.columns:
                 d[sort_by]=pd.to_numeric(d[sort_by],errors="coerce")
-                d=d.sort_values(sort_by,ascending=(order=="Smallest â†’ Largest"),na_position="last")
+                d=d.sort_values(sort_by,ascending=(order=="Smallest → Largest"),na_position="last")
 
             d=d.reset_index(drop=True)
             d.insert(0,"S.No",range(1,len(d)+1))
@@ -2050,31 +2050,31 @@ elif page=="ðŸŒ All NSE Performance":
                     return ["background-color:#dbeafe;color:#0f172a;font-weight:700" if has_call else "" for _ in row]
                 styled=classic_display.style.apply(_broker_row_style,axis=1)
                 st.dataframe(styled,use_container_width=True,height=700,hide_index=True)
-                st.caption("ðŸ”µ Blue row = recent public brokerage-call headline detected. The final column shows the brokerage name(s).")
+                st.caption("🔵 Blue row = recent public brokerage-call headline detected. The final column shows the brokerage name(s).")
             else:
                 st.dataframe(classic_display,use_container_width=True,height=700,hide_index=True)
 
-            st.markdown("### ðŸ§  Inspect a Candidate")
+            st.markdown("### 🧠 Inspect a Candidate")
             a1,a2=st.columns([3,1])
             selected=a1.selectbox("Select stock for full analysis",d["Symbol"].astype(str).tolist(),key="classic_selected")
-            if a2.button("Open Pro Analyzer â†’",type="primary",use_container_width=True,key="classic_open"):
+            if a2.button("Open Pro Analyzer →",type="primary",use_container_width=True,key="classic_open"):
                 st.query_params.clear();st.query_params["page"]="pro";st.query_params["stock"]=selected;st.rerun()
-            st.download_button("â¬‡ï¸ Export Classic Table CSV",d[cols_show].to_csv(index=False).encode(),"nse_classic_performance.csv","text/csv")
+            st.download_button("⬇️ Export Classic Table CSV",d[cols_show].to_csv(index=False).encode(),"nse_classic_performance.csv","text/csv")
 
     else:
-        st.markdown("### âš¡ Smart Scanner")
+        st.markdown("### ⚡ Smart Scanner")
         f1,f2,f3,f4=st.columns(4)
         history=f1.selectbox("History",["1y","2y","5y"],index=2,key="smart_history")
         rank_by=f2.selectbox("Rank by",["1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","% of 52W High","Volume"],index=2,key="smart_rank")
         direction=f3.selectbox("Direction",["Highest first","Lowest first"],key="smart_direction")
-        min_price=f4.number_input("Minimum price â‚¹",min_value=0.0,value=20.0,step=10.0,key="smart_price")
+        min_price=f4.number_input("Minimum price ₹",min_value=0.0,value=20.0,step=10.0,key="smart_price")
 
         g1,g2,g3=st.columns(3)
         min_volume=g1.number_input("Minimum volume",min_value=0,value=100000,step=50000,key="smart_volume")
-        rsi_zone=g2.selectbox("RSI filter",["All","40â€“60 Balanced","50â€“70 Momentum","60â€“75 Strong","Below 35 Oversold","Above 75 Overbought"],key="smart_rsi")
+        rsi_zone=g2.selectbox("RSI filter",["All","40–60 Balanced","50–70 Momentum","60–75 Strong","Below 35 Oversold","Above 75 Overbought"],key="smart_rsi")
         trend_filter=g3.selectbox("Trend filter",["All","Price > SMA20","Price > SMA50","SMA20 > SMA50","SMA50 > SMA200","Price > SMA20 > SMA50"],key="smart_trend")
 
-        if st.button("âš¡ Scan NSE Market",type="primary",use_container_width=True,key="smart_scan"):
+        if st.button("⚡ Scan NSE Market",type="primary",use_container_width=True,key="smart_scan"):
             with st.spinner("Scanning selected universe..."):
                 d=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
 
@@ -2086,9 +2086,9 @@ elif page=="ðŸŒ All NSE Performance":
                 if "Volume" in d.columns:d=d[d["Volume"]>=min_volume]
 
                 if rsi_zone!="All":
-                    if rsi_zone=="40â€“60 Balanced":d=d[d["RSI14"].between(40,60)]
-                    elif rsi_zone=="50â€“70 Momentum":d=d[d["RSI14"].between(50,70)]
-                    elif rsi_zone=="60â€“75 Strong":d=d[d["RSI14"].between(60,75)]
+                    if rsi_zone=="40–60 Balanced":d=d[d["RSI14"].between(40,60)]
+                    elif rsi_zone=="50–70 Momentum":d=d[d["RSI14"].between(50,70)]
+                    elif rsi_zone=="60–75 Strong":d=d[d["RSI14"].between(60,75)]
                     elif rsi_zone=="Below 35 Oversold":d=d[d["RSI14"]<35]
                     elif rsi_zone=="Above 75 Overbought":d=d[d["RSI14"]>75]
 
@@ -2104,17 +2104,17 @@ elif page=="ðŸŒ All NSE Performance":
                 d.insert(0,"S.No",range(1,len(d)+1))
                 st.dataframe(clean_display(d),use_container_width=True,height=620,hide_index=True)
 
-                st.markdown("### ðŸ§  Inspect a Candidate")
+                st.markdown("### 🧠 Inspect a Candidate")
                 a1,a2=st.columns([3,1])
                 selected=a1.selectbox("Select stock for full analysis",d["Symbol"].astype(str).tolist(),key="smart_selected")
-                if a2.button("Open Pro Analyzer â†’",type="primary",use_container_width=True,key="smart_open"):
+                if a2.button("Open Pro Analyzer →",type="primary",use_container_width=True,key="smart_open"):
                     st.query_params.clear();st.query_params["page"]="pro";st.query_params["stock"]=selected;st.rerun()
-                st.download_button("â¬‡ï¸ Export Smart Scan CSV",d.to_csv(index=False).encode(),"nse_smart_scan.csv","text/csv")
-elif page=="ðŸ¦ Institutional Watch":
-    st.markdown("## ðŸ¦ Institutional / FII-DII Watch")
+                st.download_button("⬇️ Export Smart Scan CSV",d.to_csv(index=False).encode(),"nse_smart_scan.csv","text/csv")
+elif page=="🏦 Institutional Watch":
+    st.markdown("## 🏦 Institutional / FII-DII Watch")
     st.warning("Price/volume cannot prove FII/DII buying. This page separates verified ownership/deal evidence from technical participation.")
 
-    t1,t2,t3=st.tabs(["ðŸ“ˆ Quarterly Holding Change","ðŸ’¼ Bulk / Block Deals","ðŸ“Š Institutional-Style Momentum"])
+    t1,t2,t3=st.tabs(["📈 Quarterly Holding Change","💼 Bulk / Block Deals","📊 Institutional-Style Momentum"])
     with t1:
         st.markdown("### Upload shareholding history")
         st.caption("Expected columns can include: Symbol, FII Current %, FII Previous %, DII Current %, DII Previous %.")
@@ -2134,7 +2134,7 @@ elif page=="ðŸ¦ Institutional Watch":
         st.write("Next reliable integration: scheduled ingestion of NSE bulk/block deal files or broker/API disclosure feed.")
     with t3:
         st.markdown("### Participation proxy")
-        st.caption("This is a technical proxy only â€” not FII/DII ownership evidence.")
+        st.caption("This is a technical proxy only — not FII/DII ownership evidence.")
         if st.button("Run High Volume Breakout Proxy",key="inst_proxy"):
             syms=universe()[:500]
             with st.spinner("Scanning price + volume participation..."):
@@ -2143,7 +2143,7 @@ elif page=="ðŸ¦ Institutional Watch":
             st.dataframe(clean_display(res),use_container_width=True,height=560,hide_index=True)
 
 else:
-    st.markdown("## ðŸ’¾ Market Data Hub")
-    st.markdown("### âœ… Yes â€” you can stop manually typing closing prices.")
+    st.markdown("## 💾 Market Data Hub")
+    st.markdown("### ✅ Yes — you can stop manually typing closing prices.")
     st.write("Use the All NSE Performance module to calculate 1D, 1W, 1M, 3M, 6M, 1Y and 5Y returns and export them to CSV.")
     st.write("For speed: single-stock analysis is quick; the first full-universe 5-year refresh is a large job and can take longer. Cache makes repeated use faster.")
