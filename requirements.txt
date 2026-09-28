@@ -2,6 +2,7 @@ streamlit
 pandas
 numpy
 requests
+yfinance
 plotly
-yfinance>=0.2.38
-curl_cffi>=0.5.1
+gspread
+google-auth
