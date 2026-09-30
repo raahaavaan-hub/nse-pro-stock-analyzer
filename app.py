@@ -2,7 +2,10 @@
 import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
 import json
 from datetime import date, datetime
+from datetime import timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+import gspread
 import requests
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
@@ -106,33 +109,227 @@ def pct(s,n):
     old=s.iloc[-1-n] if len(s)>n else s.iloc[0]
     return (s.iloc[-1]/old-1)*100 if old else np.nan
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def bulk_snapshot(symbols_tuple, period="5y"):
-    syms=list(symbols_tuple); rows=[]
-    for k in range(0,len(syms),70):
-        batch=syms[k:k+70]; ticks=[s+".NS" for s in batch]
-        try:d=yf.download(ticks,period=period,interval="1d",group_by="column",auto_adjust=False,progress=False,threads=True)
-        except:continue
-        if d is None or d.empty:continue
-        for s,t in zip(batch,ticks):
-            try:
-                close=d["Close"][t] if isinstance(d.columns,pd.MultiIndex) else d["Close"]
-                high=d["High"][t] if isinstance(d.columns,pd.MultiIndex) else d["High"]
-                low=d["Low"][t] if isinstance(d.columns,pd.MultiIndex) else d["Low"]
-                vol=d["Volume"][t] if isinstance(d.columns,pd.MultiIndex) else d["Volume"]
-                close=close.dropna()
-                if close.empty:continue
-                latest=float(close.iloc[-1]); hi52=float(high.tail(252).max()); lo52=float(low.tail(252).min())
-                sma20=float(close.tail(20).mean()) if len(close)>=20 else np.nan
-                sma50=float(close.tail(50).mean()) if len(close)>=50 else np.nan
-                sma200=float(close.tail(200).mean()) if len(close)>=200 else np.nan
-                delta=close.diff();gain=delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean();loss=(-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean();rs=gain/loss.replace(0,np.nan)
-                rsi=float((100-100/(1+rs)).iloc[-1]) if len(close)>=15 else np.nan
-                v=float(vol.dropna().iloc[-1]) if not vol.dropna().empty else 0
-                va=float(vol.tail(20).mean()) if len(vol.dropna())>=5 else np.nan
-                rows.append({"Symbol":s,"Latest":latest,"1D %":pct(close,1),"1W %":pct(close,5),"1M %":pct(close,21),"3M %":pct(close,63),"6M %":pct(close,126),"1Y %":pct(close,252),"5Y %":pct(close,1260),"RSI14":rsi,"SMA20":sma20,"SMA50":sma50,"SMA200":sma200,"52W High":hi52,"52W Low":lo52,"% of 52W High":latest/hi52*100 if hi52 else np.nan,"Volume":int(v),"Volume Ratio":v/va if va and np.isfinite(va) else np.nan,"Up Days 20":int((close.diff().tail(20)>0).sum())})
-            except:continue
+MARKET_CACHE_TAB="NSE Price Cache"
+MARKET_CACHE_HEADER=["Symbol","Last Price Date","Last Checked IST","Close History 1","Close History 2","Recent High Low Volume","Format"]
+MARKET_CACHE_COLUMNS=list(range(1,8))
+
+@st.cache_resource(show_spinner=False)
+def market_cache_worksheet():
+    """Use a separate tab in the configured workbook; never touch transaction tabs."""
+    sheet_id=str(st.secrets.get("market_sheet_id","")).strip()
+    account=st.secrets.get("gcp_service_account")
+    if not sheet_id or not account:
+        return None
+    client=gspread.service_account_from_dict(dict(account))
+    book=client.open_by_key(sheet_id)
+    try:
+        tab=book.worksheet(MARKET_CACHE_TAB)
+    except gspread.WorksheetNotFound:
+        tab=book.add_worksheet(title=MARKET_CACHE_TAB,rows=4000,cols=7)
+    if tab.acell("A1").value!="Symbol":
+        tab.update(values=[MARKET_CACHE_HEADER],range_name="A1:G1",raw=True)
+    return tab
+
+def market_cache_state():
+    if "shared_nse_price_cache" not in st.session_state:
+        st.session_state.shared_nse_price_cache={"loaded":False,"records":{},"positions":{},"sheet":None,"next_row":2}
+    state=st.session_state.shared_nse_price_cache
+    if state["loaded"]:
+        return state
+    try:
+        tab=market_cache_worksheet()
+        state["sheet"]=tab
+        if tab is not None:
+            sheet_values=tab.get_all_values()
+            state["next_row"]=len(sheet_values)+1
+            for row_number,values in enumerate(sheet_values[1:],start=2):
+                if not values or not values[0].strip():
+                    continue
+                symbol=values[0].strip().upper()
+                values=(values+[""]*7)[:7]
+                try:
+                    if values[6]!="v1":
+                        continue
+                    closes=json.loads(values[3])+json.loads(values[4])
+                    recent=json.loads(values[5])
+                    state["records"][symbol]={"closes":closes,"recent":recent,
+                                               "last_date":values[1],"checked":values[2]}
+                    state["positions"][symbol]=row_number
+                except (ValueError,TypeError):
+                    continue
+        else:
+            st.info("Shared NSE cache is using this session only. Set market_sheet_id and gcp_service_account in Streamlit secrets to save it to Google Sheets.")
+    except Exception as error:
+        st.warning(f"NSE Sheet cache unavailable; using this session only: {error}")
+    state["loaded"]=True
+    return state
+
+def market_cache_row(symbol,record):
+    closes=record["closes"]
+    return [symbol,record["last_date"],record["checked"],
+            json.dumps(closes[:650],separators=(",",":")),
+            json.dumps(closes[650:],separators=(",",":")),
+            json.dumps(record["recent"],separators=(",",":")),"v1"]
+
+def market_cache_save(state,changed):
+    tab=state["sheet"]
+    if tab is None or not changed:
+        return
+    existing=[];new=[]
+    for symbol in changed:
+        row=market_cache_row(symbol,state["records"][symbol])
+        if symbol in state["positions"]:
+            position=state["positions"][symbol]
+            existing.append({"range":f"A{position}:G{position}","values":[row]})
+        else:
+            new.append((symbol,row))
+    try:
+        for start in range(0,len(existing),40):
+            tab.batch_update(existing[start:start+40],value_input_option="RAW")
+        for start in range(0,len(new),40):
+            batch=new[start:start+40]
+            tab.append_rows([row for _,row in batch],value_input_option="RAW")
+            next_row=state["next_row"]
+            for offset,(symbol,_) in enumerate(batch):
+                state["positions"][symbol]=next_row+offset
+            state["next_row"]+=len(batch)
+    except Exception as error:
+        st.warning(f"Recent prices are visible, but saving them to Google Sheets failed: {error}")
+
+def market_cache_frame(download,symbol,ticker,batch_size):
+    if download is None or download.empty:
+        return pd.DataFrame()
+    try:
+        if isinstance(download.columns,pd.MultiIndex):
+            if ticker in download.columns.get_level_values(0):
+                return download[ticker]
+            return download.xs(ticker,axis=1,level=1)
+        if batch_size==1:
+            return download
+    except (KeyError,ValueError):
+        pass
+    return pd.DataFrame()
+
+def market_cache_fetch(symbols,start=None):
+    """Initial backfill is 5y; subsequent refresh starts near the last saved day."""
+    result={}
+    for offset in range(0,len(symbols),70):
+        batch=symbols[offset:offset+70]
+        tickers=[symbol+".NS" for symbol in batch]
+        opts={"start":start} if start else {"period":"5y"}
+        try:
+            downloaded=yf.download(tickers,interval="1d",group_by="ticker",
+                                   auto_adjust=False,progress=False,threads=True,**opts)
+        except Exception:
+            downloaded=None
+        for symbol,ticker in zip(batch,tickers):
+            frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
+            if frame.empty:
+                try:
+                    frame=yf.download(ticker,interval="1d",auto_adjust=False,
+                                      progress=False,threads=False,**opts)
+                    if isinstance(frame.columns,pd.MultiIndex):
+                        frame.columns=frame.columns.get_level_values(0)
+                except Exception:
+                    frame=pd.DataFrame()
+            if not frame.empty and "Close" in frame:
+                result[symbol]=frame
+    return result
+
+def market_cache_merge(previous,frame,checked):
+    close_by_date={str(day):float(value) for day,value in (previous or {}).get("closes",[])}
+    recent_by_date={str(day):[float(high),float(low),int(volume)] for day,high,low,volume
+                    in (previous or {}).get("recent",[])}
+    for index,row in frame.iterrows():
+        try:
+            day=pd.Timestamp(index).date().isoformat()
+            close=float(row["Close"])
+            if not np.isfinite(close) or close<=0:
+                continue
+            close_by_date[day]=round(close,4)
+            high=float(row.get("High",close));low=float(row.get("Low",close))
+            volume=float(row.get("Volume",0))
+            recent_by_date[day]=[round(high,4) if np.isfinite(high) else close,
+                                 round(low,4) if np.isfinite(low) else close,
+                                 int(volume) if np.isfinite(volume) else 0]
+        except (ValueError,TypeError,KeyError):
+            continue
+    days=sorted(close_by_date)[-1261:]
+    if not days:
+        return previous
+    recent_days=[day for day in sorted(recent_by_date) if day in close_by_date][-260:]
+    return {"closes":[[day,close_by_date[day]] for day in days],
+            "recent":[[day,*recent_by_date[day]] for day in recent_days],
+            "last_date":days[-1],"checked":checked}
+
+def market_cache_metrics(symbol,record):
+    close=pd.Series([value for _,value in record["closes"]],dtype=float)
+    if close.empty:
+        return None
+    recent=record["recent"]
+    high=pd.Series([row[1] for row in recent],dtype=float)
+    low=pd.Series([row[2] for row in recent],dtype=float)
+    vol=pd.Series([row[3] for row in recent],dtype=float)
+    latest=float(close.iloc[-1])
+    hi52=float(high.tail(252).max()) if not high.empty else np.nan
+    lo52=float(low.tail(252).min()) if not low.empty else np.nan
+    delta=close.diff()
+    gain=delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
+    loss=(-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
+    rs=gain/loss.replace(0,np.nan)
+    volume=float(vol.iloc[-1]) if not vol.empty else 0
+    volume_average=float(vol.tail(20).mean()) if len(vol)>=5 else np.nan
+    return {"Symbol":symbol,"Latest":latest,"1D %":pct(close,1),"1W %":pct(close,5),
+            "1M %":pct(close,21),"3M %":pct(close,63),"6M %":pct(close,126),
+            "1Y %":pct(close,252),"5Y %":pct(close,1260),
+            "RSI14":float((100-100/(1+rs)).iloc[-1]) if len(close)>=15 else np.nan,
+            "SMA20":float(close.tail(20).mean()) if len(close)>=20 else np.nan,
+            "SMA50":float(close.tail(50).mean()) if len(close)>=50 else np.nan,
+            "SMA200":float(close.tail(200).mean()) if len(close)>=200 else np.nan,
+            "52W High":hi52,"52W Low":lo52,
+            "% of 52W High":latest/hi52*100 if hi52 else np.nan,
+            "Volume":int(volume),
+            "Volume Ratio":volume/volume_average if volume_average and np.isfinite(volume_average) else np.nan,
+            "Up Days 20":int((close.diff().tail(20)>0).sum())}
+
+def shared_market_snapshot(symbols,force_refresh=False):
+    state=market_cache_state()
+    symbols=list(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if symbol))
+    checked=datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    missing=[symbol for symbol in symbols if symbol not in state["records"]]
+    stale=[symbol for symbol in symbols if symbol in state["records"] and
+           (force_refresh or state["records"][symbol]["checked"]!=checked)]
+    changed=[]
+    for symbol,frame in market_cache_fetch(missing).items():
+        record=market_cache_merge(None,frame,checked)
+        if record:
+            state["records"][symbol]=record;changed.append(symbol)
+    # Existing symbols fetch only the latest few days. Group by saved date so
+    # every Yahoo batch can share one start date and one network request.
+    groups={}
+    for symbol in stale:
+        last=state["records"][symbol]["last_date"]
+        start=(date.fromisoformat(last)-timedelta(days=5)).isoformat()
+        groups.setdefault(start,[]).append(symbol)
+    for start,group in groups.items():
+        fresh=market_cache_fetch(group,start=start)
+        for symbol in group:
+            old=state["records"][symbol]
+            record=market_cache_merge(old,fresh[symbol],checked) if symbol in fresh else dict(old,checked=checked)
+            state["records"][symbol]=record;changed.append(symbol)
+    market_cache_save(state,changed)
+    rows=[]
+    for symbol in symbols:
+        record=state["records"].get(symbol)
+        if record:
+            metrics=market_cache_metrics(symbol,record)
+            if metrics:rows.append(metrics)
     return pd.DataFrame(rows)
+
+def bulk_snapshot(symbols_tuple,period="5y",force_refresh=False):
+    # Keep the old caller interface. Shorter history still uses the same
+    # stored 5-year series; only its selected output columns are displayed.
+    return shared_market_snapshot(symbols_tuple,force_refresh=force_refresh)
 
 SCREENERS={
 "52W Breakout Leaders":"Near 52W high + above SMA50",
@@ -1146,8 +1343,7 @@ elif page=="🔥 Market Heatmap":
     with f3:
         sort_mode=st.selectbox("Arrange",["🟢 Green first → 🔴 Red last","🚀 Highest % first","🔻 Lowest % first","A → Z"],index=0,key="heat_sort_mode")
     with f4:
-        if st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh"):
-            st.cache_data.clear(); st.rerun()
+        heat_force_refresh=st.button("↻ Refresh",use_container_width=True,key="heat_stock_refresh")
 
     move_filter=st.radio("Show",["All","🟢 Gainers","🔴 Losers","⚪ Unchanged"],horizontal=True,key="heat_move_filter")
 
@@ -1160,63 +1356,26 @@ elif page=="🔥 Market Heatmap":
         target={"NIFTY 50":50,"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500}[universe_name]
         syms=(nifty50+[s for s in all_syms if s not in nifty50])[:target]
 
-    @st.cache_data(ttl=300,show_spinner=False)
-    def stock_heat_prices(symbols,period_label):
-        cfg={
-            "1 Day":("5d",1),
-            "1 Week":("1mo",5),
-            "1 Month":("3mo",21),
-            "3 Months":("6mo",63),
-            "6 Months":("1y",126),
-            "1 Year":("2y",252),
-            "5 Years":("5y",1260),
-        }
-        yf_period,lookback=cfg[period_label]
+    period_column={"1 Day":"1D %","1 Week":"1W %","1 Month":"1M %",
+                   "3 Months":"3M %","6 Months":"6M %","1 Year":"1Y %","5 Years":"5Y %"}[heat_period]
+
+    def stock_heat_prices(symbols,period_label,force_refresh=False):
+        snapshot=shared_market_snapshot(symbols,force_refresh=force_refresh)
+        if snapshot.empty:
+            return []
         result=[]
-        loaded=set()
-
-        def add_row(s,c):
-            c=c.dropna()
-            if len(c)<1:return
-            last=float(c.iloc[-1])
-            base=float(c.iloc[-(lookback+1)]) if len(c)>lookback else float(c.iloc[0])
-            ch=last-base
-            pct=(ch/base*100) if base else 0
-            result.append((s,last,ch,pct))
-            loaded.add(s)
-
-        # Fast batch pass
-        for k in range(0,len(symbols),100):
-            batch=symbols[k:k+100]; tick=[s+".NS" for s in batch]
-            try:
-                data=yf.download(tick,period=yf_period,interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
-            except Exception:
-                data=None
-            if data is not None:
-                for s,t in zip(batch,tick):
-                    try:
-                        d=data if len(batch)==1 else data[t]
-                        add_row(s,d["Close"])
-                    except Exception:
-                        pass
-
-        # Retry missing stocks one-by-one. This prevents a partial Yahoo batch
-        # response from turning NIFTY 50 into only 20/42 visible tiles.
-        missing=[s for s in symbols if s not in loaded]
-        for s in missing:
-            try:
-                d=yf.download(s+".NS",period=yf_period,interval="1d",auto_adjust=False,progress=False,threads=False)
-                if isinstance(d.columns,pd.MultiIndex):
-                    d.columns=[c[0] for c in d.columns]
-                add_row(s,d["Close"])
-            except Exception:
-                pass
-
-        order={s:i for i,s in enumerate(symbols)}
-        return sorted(result,key=lambda x:order.get(x[0],999999))
+        for row in snapshot.to_dict("records"):
+            last=float(row["Latest"]);change_pct=float(row[period_column])
+            if not np.isfinite(change_pct):
+                change_pct=0.0
+            if change_pct<=-100:
+                continue
+            previous=last/(1+change_pct/100)
+            result.append((row["Symbol"],last,last-previous,change_pct))
+        return result
 
     with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
-        rows=stock_heat_prices(syms,heat_period)
+        rows=stock_heat_prices(syms,heat_period,force_refresh=heat_force_refresh)
 
     if not rows:
         st.warning("Stock data unavailable. Press Refresh.")
@@ -1349,7 +1508,7 @@ elif page=="🧠 Pro Analyzer":
     name=PA_val(info,"longName","shortName") or symbol
 
     st.markdown(f"## {name}  ·  NSE: {symbol}")
-    st.link_button("Open this stock in Screener", f"https://www.screener.in/company/{symbol}/")
+    st.link_button("📊 Open this stock in Screener", f"https://www.screener.in/company/{symbol}/", use_container_width=False)
     if last is not None:
         st.markdown(f"### ₹{last:,.2f} &nbsp; <span style='color:{'#22c55e' if (pct or 0)>=0 else '#ef4444'}'>{pct:+.2f}%</span>" if pct is not None else f"### ₹{last:,.2f}",unsafe_allow_html=True)
 
@@ -1840,7 +1999,7 @@ elif page=="🌐 All NSE Performance":
 
         if st.button("📊 Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
             with st.spinner(f"Loading {len(use_syms):,} stocks..."):
-                st.session_state["classic_df"]=bulk_snapshot(tuple(use_syms),history)
+                st.session_state["classic_df"]=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
 
         classic=st.session_state.get("classic_df")
         if isinstance(classic,pd.DataFrame) and not classic.empty:
@@ -1917,7 +2076,7 @@ elif page=="🌐 All NSE Performance":
 
         if st.button("⚡ Scan NSE Market",type="primary",use_container_width=True,key="smart_scan"):
             with st.spinner("Scanning selected universe..."):
-                d=bulk_snapshot(tuple(use_syms),history)
+                d=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
 
             if isinstance(d,pd.DataFrame) and not d.empty:
                 for col in ["Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume"]:
