@@ -1608,6 +1608,137 @@ def render_us_market():
                 except Exception: st.error('Stock report is temporarily unavailable. Try again later.')
 
 
+@st.cache_data(ttl=86400,show_spinner=False)
+def nse_sector_constituents(group):
+    files={'NIFTY 50':'ind_nifty50list.csv','NIFTY 100':'ind_nifty100list.csv',
+           'NIFTY 200':'ind_nifty200list.csv','NIFTY 500':'ind_nifty500list.csv',
+           'NIFTY Midcap':'ind_niftymidcap150list.csv','NIFTY Smallcap':'ind_niftysmallcap250list.csv',
+           'Total Market':'ind_niftytotalmarket_list.csv'}
+    filename=files[group]
+    last_error=None
+    for host in ['https://nsearchives.nseindia.com/content/indices/','https://www.niftyindices.com/IndexConstituent/']:
+        try:
+            r=requests.get(host+filename,headers=HEADERS,timeout=(5,15));r.raise_for_status()
+            d=pd.read_csv(io.BytesIO(r.content));d.columns=d.columns.str.strip()
+            if not {'Symbol','Industry','Company Name'}.issubset(d.columns):raise ValueError('Constituent format changed')
+            d=d[['Symbol','Industry','Company Name']].dropna(subset=['Symbol']).copy()
+            d['Symbol']=d.Symbol.astype(str).str.strip()
+            return d.drop_duplicates('Symbol')
+        except Exception as exc:last_error=exc
+    raise ValueError('NSE constituent source unavailable') from last_error
+
+@st.cache_data(ttl=604800,show_spinner=False)
+def nse_extra_sector(symbol):
+    try:
+        info=yf.Ticker(symbol+'.NS').get_info()
+        value=str(info.get('sector') or info.get('industry') or '').strip()
+        return {'sector':value,'company':str(info.get('longName') or symbol)} if value else {}
+    except Exception:return {}
+
+
+def nse_sector_return(record,sessions):
+    closes=(record or {}).get('closes',[])
+    if not closes:return np.nan
+    if len(closes)<=sessions:
+        # Yahoo's five-year calendar window need not contain exactly 1260 sessions.
+        if sessions!=1260:return np.nan
+        end=pd.Timestamp(closes[-1][0]);boundary=end-pd.DateOffset(years=5)
+        if pd.Timestamp(closes[0][0])>boundary+pd.Timedelta(days=7):return np.nan
+        baseline=closes[0][1]
+    else:baseline=closes[-sessions-1][1]
+    last=closes[-1][1]
+    return (float(last)/float(baseline)-1)*100 if baseline and float(baseline)>0 else np.nan
+
+
+def nse_sector_colour(value):
+    if pd.isna(value):return '#64748b'
+    if value==0:return '#374151'
+    strength=min(np.log1p(abs(float(value)))/np.log(21),1)
+    if value>0:return f'rgb(18,{int(95+65*strength)},65)'
+    return f'rgb({int(120+70*strength)},35,45)'
+
+
+def nse_sector_figure(frame,period):
+    ids=['root'];labels=['NSE stocks'];parents=[''];values=[len(frame)];colours=['#0b1523'];texts=[''];custom=[['','','','']]
+    for i,(sector,part) in enumerate(frame.groupby('Sector',sort=True)):
+        group_id='group-'+str(i);ids.append(group_id);labels.append(html.escape(str(sector)));parents.append('root');values.append(len(part));colours.append('#17283e');texts.append(str(len(part))+' stocks');custom.append(['','','',''])
+        for _,r in part.iterrows():
+            ids.append('stock-'+str(r.Symbol));labels.append(html.escape(str(r.Symbol)));parents.append(group_id);values.append(1)
+            colours.append(nse_sector_colour(r.Return));ret='Unavailable' if pd.isna(r.Return) else f'{r.Return:+.2f}%'
+            texts.append(ret);custom.append([html.escape(str(r.Company)),ret,'—' if pd.isna(r.Latest) else f'₹{r.Latest:,.2f}',str(r.Date)])
+    fig=go.Figure(go.Treemap(ids=ids,labels=labels,parents=parents,values=values,branchvalues='total',
+             marker=dict(colors=colours,line=dict(width=1,color='#0b1523')),text=texts,texttemplate='%{label}<br>%{text}',
+             textfont=dict(color='white',size=13),customdata=custom,
+             hovertemplate='<b>%{label}</b><br>%{customdata[0]}<br>'+html.escape(period)+': %{customdata[1]}<br>%{customdata[2]}<br>Price date: %{customdata[3]}<extra></extra>',
+             pathbar=dict(visible=True,textfont=dict(color='white'))))
+    fig.update_layout(height=700,margin=dict(t=10,l=0,r=0,b=0),paper_bgcolor='#0b1523',font_color='#f8fafc',uniformtext=dict(minsize=10,mode='hide'))
+    return fig
+
+
+def render_nse_sector_view(group):
+    st.markdown('### 🧩 Sector-wise Stocks')
+    periods={'1 Day':1,'5 Days':5,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'5 Years':1260}
+    period=st.selectbox('Performance period',list(periods),key='nse_sector_period')
+    st.caption('Green = positive · Red = negative · Dark neutral = zero · Grey = insufficient / unavailable history. Equal-size stock tiles. Click a sector to zoom; use the path above the chart to return.')
+    try:
+        if group=='All NSE':symbols=list(dict.fromkeys(universe()))
+        else:symbols=nse_sector_constituents(group).Symbol.tolist()
+    except Exception:
+        st.error('The selected NSE constituent list is unavailable. Please retry later.');return
+    metadata={}
+    for catalog_group in ['Total Market','NIFTY 500',group if group!='All NSE' else 'Total Market']:
+        try:
+            for _,r in nse_sector_constituents(catalog_group).iterrows():metadata[str(r.Symbol)]={'sector':str(r.Industry),'company':str(r['Company Name'])}
+        except Exception:pass
+    st.caption(f'{len(symbols):,} requested stocks · NSE industry classifications are used as sector groups. Additional Yahoo sector labels are marked “Yahoo”.')
+    col1,col2=st.columns(2)
+    if col1.button('Build / Refresh Sector Heatmap',type='primary',use_container_width=True,key='nse_sector_build'):
+        with st.spinner(f'Loading saved prices / updating {len(symbols):,} stocks…'):
+            bulk_snapshot(tuple(symbols),'5y',force_refresh=True)
+        st.session_state['nse_sector_loaded']=tuple(symbols)
+    extra=st.session_state.setdefault('nse_sector_extra',{})
+    unknown=[symbol for symbol in symbols if symbol not in metadata and symbol not in extra]
+    if col2.button('Fetch missing sector labels',use_container_width=True,key='nse_sector_labels',disabled=not unknown):
+        from concurrent.futures import ThreadPoolExecutor,as_completed
+        status=st.empty();progress=st.progress(0)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures={executor.submit(nse_extra_sector,symbol):symbol for symbol in unknown}
+            for i,future in enumerate(as_completed(futures)):
+                data=future.result()
+                if data:extra[futures[future]]=data
+                progress.progress((i+1)/len(unknown));status.caption(f'Sector labels checked: {i+1:,}/{len(unknown):,}')
+        progress.empty();status.empty()
+    records=market_cache_state()['records'];rows=[]
+    for symbol in symbols:
+        record=records.get(symbol);closes=(record or {}).get('closes',[])
+        data=metadata.get(symbol) or extra.get(symbol) or {}
+        label=data.get('sector') or 'Unclassified'
+        if symbol not in metadata and label!='Unclassified':label+=' · Yahoo'
+        rows.append({'Symbol':symbol,'Company':data.get('company') or symbol,'Sector':label,
+                     'Return':nse_sector_return(record,periods[period]),'Latest':float(closes[-1][1]) if closes else np.nan,
+                     'Date':closes[-1][0] if closes else 'Unavailable'})
+    frame=pd.DataFrame(rows)
+    if not frame.Latest.notna().any():
+        st.info('Click Build / Refresh Sector Heatmap to load prices.');return
+    st.caption(f'{frame.Latest.notna().sum():,}/{len(frame):,} stocks have prices · {frame.Return.notna().sum():,} have enough history for {period} · {frame.Sector.eq("Unclassified").sum():,} unclassified. Price dates are shown on hover; cached stocks can have different dates.')
+    st.plotly_chart(nse_sector_figure(frame,period),use_container_width=True)
+    st.download_button('Export selected-period sector data',frame.to_csv(index=False),'nse_sector_performance.csv','text/csv')
+
+
+
+st.markdown("""<style>
+/* Contrast fixes apply to controls across all modules. */
+[data-testid="stWidgetLabel"] p,[data-testid="stRadio"] label p,[data-testid="stCheckbox"] label p{color:#e2e8f0!important;opacity:1!important}
+[data-testid="stTabs"] [role="tab"]{color:#cbd5e1!important;opacity:1!important}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"]{color:#60a5fa!important;font-weight:700}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"]{color:#e2e8f0}
+[data-testid="stButton"] button,[data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a{background-color:#14243c;color:#f8fafc;border-color:#38577d}
+[data-testid="stButton"] button p,[data-testid="stDownloadButton"] button p,[data-testid="stLinkButton"] a p{color:inherit!important}
+[data-testid="stButton"] button[kind="primary"]{background:#1d4ed8;color:white}
+[data-baseweb="select"]{color:#172033}
+[data-baseweb="select"] input,[data-baseweb="input"] input,[data-baseweb="textarea"] textarea{color:#172033!important}
+</style>""",unsafe_allow_html=True)
+
 st.sidebar.markdown("## 📈 NSE PRO")
 page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
@@ -2498,7 +2629,7 @@ elif page=="🌐 All NSE Performance":
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
     st.markdown("## 📋 Stock Performance")
-    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner"],horizontal=True,key="allnse_view")
+    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner","🧩 Sector-wise Stocks"],horizontal=True,key="allnse_view")
 
     universe_group=st.selectbox(
         "Universe",
@@ -2515,7 +2646,9 @@ elif page=="🌐 All NSE Performance":
     elif universe_group=="NIFTY Smallcap": use_syms=syms[250:500]
     else: use_syms=syms
 
-    if view=="📋 Classic Table (Excel Style)":
+    if view=="🧩 Sector-wise Stocks":
+        render_nse_sector_view(universe_group)
+    elif view=="📋 Classic Table (Excel Style)":
         st.markdown("### 📋 Classic Performance Table")
         c1,c2,c3=st.columns(3)
         history=c1.selectbox("History",["1y","2y","5y"],index=2,key="classic_history")
