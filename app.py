@@ -351,6 +351,37 @@ def shared_market_snapshot(symbols,force_refresh=False):
             if metrics:rows.append(metrics)
     return pd.DataFrame(rows)
 
+@st.cache_data(ttl=900,show_spinner=False)
+def classic_period_snapshot(symbols_tuple,period):
+    """Classic table downloads only its selected history, independently of sector cache."""
+    symbols=list(dict.fromkeys(symbols_tuple));rows=[];failed=[]
+    checked=datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    progress=st.progress(0);status=st.empty()
+    try:
+        for offset in range(0,len(symbols),70):
+            batch=symbols[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
+            try:
+                downloaded=yf.download(tickers,period=period,interval='1d',group_by='ticker',
+                    auto_adjust=False,progress=False,threads=True,timeout=20)
+            except Exception:downloaded=None
+            for symbol,ticker in zip(batch,tickers):
+                frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
+                # Failed tickers remain unavailable; no long series of individual retries.
+                record=market_cache_merge(None,frame,checked) if not frame.empty else None
+                if record:
+                    row=market_cache_metrics(symbol,record)
+                    if row:
+                        if period!='5y':row['5Y %']=np.nan
+                        rows.append(row)
+                else:failed.append(symbol)
+            done=min(offset+len(batch),len(symbols))
+            progress.progress(done/max(len(symbols),1))
+            status.caption(f'Prices processed: {done:,}/{len(symbols):,} · available: {len(rows):,} · unavailable: {len(failed):,}')
+    finally:
+        progress.empty();status.empty()
+    return pd.DataFrame(rows),failed
+
+
 def bulk_snapshot(symbols_tuple,period="5y",force_refresh=False):
     # Keep the old caller interface. Shorter history still uses the same
     # stored 5-year series; only its selected output columns are displayed.
@@ -2712,9 +2743,18 @@ elif page=="🌐 All NSE Performance":
 
         if st.button("📊 Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
             with loading_stopwatch(f"Loading {len(use_syms):,} stocks..."):
-                st.session_state["classic_df"]=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
+                table,failed=classic_period_snapshot(tuple(use_syms),history)
+                st.session_state['classic_df']=table
+                st.session_state['classic_failed']=failed
+                st.session_state['classic_selection']=(tuple(use_syms),history)
 
-        classic=st.session_state.get("classic_df")
+        if st.session_state.get('classic_selection')!=(tuple(use_syms),history):
+            st.info('Click Build / Refresh to load the selected universe and history.')
+            classic=None
+        else:classic=st.session_state.get("classic_df")
+        st.caption('Selected history only · results reused for 15 minutes. Sector history is loaded separately.')
+        if classic is not None and st.session_state.get('classic_failed'):
+            st.warning(f"{len(st.session_state['classic_failed']):,} stocks returned no prices and are excluded; no individual retry loop.")
         if isinstance(classic,pd.DataFrame) and not classic.empty:
             d=classic.copy()
             if sort_by=="Symbol":
