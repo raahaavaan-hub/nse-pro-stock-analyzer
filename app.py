@@ -1101,8 +1101,444 @@ st.markdown("""
 </style>
 """,unsafe_allow_html=True)
 
+# Separate NSE circuit scanner: never infer circuit status from percentage alone.
+def circuit_csv(content):
+    d=pd.read_csv(io.BytesIO(content))
+    d.columns=[str(c).strip().upper() for c in d.columns]
+    for c in d.select_dtypes(include='object'):
+        d[c]=d[c].astype(str).str.strip()
+    return d
+
+
+def circuit_join_reports(bhav,bands,hitters,day):
+    required={'SYMBOL','SERIES','PREV_CLOSE','CLOSE_PRICE','HIGH_PRICE','LOW_PRICE','TTL_TRD_QNTY'}
+    if not required.issubset(bhav.columns): raise ValueError('Closing report format changed')
+    if not {'SYMBOL','SERIES','BAND'}.issubset(bands.columns): raise ValueError('Band report format changed')
+    if not {'SYMBOL','SERIES','HIGH/LOW'}.issubset(hitters.columns): raise ValueError('Band-hitter report format changed')
+    b=bands.drop_duplicates(['SYMBOL','SERIES'])
+    d=bhav.merge(b,on=['SYMBOL','SERIES'],how='inner',validate='many_to_one')
+    for c in ['PREV_CLOSE','CLOSE_PRICE','HIGH_PRICE','LOW_PRICE','TTL_TRD_QNTY']:
+        d[c]=pd.to_numeric(d[c],errors='coerce')
+    d=d[d.TTL_TRD_QNTY.gt(0)&d.PREV_CLOSE.gt(0)&d.CLOSE_PRICE.gt(0)]
+    d['Band %']=pd.to_numeric(d.BAND.astype(str).str.replace('%','',regex=False),errors='coerce')
+    upper=set(map(tuple,hitters.loc[hitters['HIGH/LOW'].eq('H'),['SYMBOL','SERIES']].values))
+    lower=set(map(tuple,hitters.loc[hitters['HIGH/LOW'].eq('L'),['SYMBOL','SERIES']].values))
+    records=[]
+    for _,r in d.iterrows():
+        key=(r.SYMBOL,r.SERIES)
+        fixed=pd.notna(r['Band %']) and r['Band %'] in [2,5,10,20]
+        dynamic=str(r.BAND).lower().replace(' ','') in ['noband','no-band']
+        if not (fixed or dynamic): continue
+        for side,keys,extreme in [('Upper',upper,r.HIGH_PRICE),('Lower',lower,r.LOW_PRICE)]:
+            if key not in keys: continue
+            # Report explicitly confirms an intraday band hit; compare official close to extreme.
+            closed=bool(np.isclose(r.CLOSE_PRICE,extreme,rtol=0,atol=0.005))
+            records.append({'Date':day.isoformat(),'Symbol':r.SYMBOL,'Series':r.SERIES,
+                'Company':r.get('SECURITY NAME',r.SYMBOL),'Band %':r['Band %'],
+                'Type':'Fixed' if fixed else 'Dynamic','Direction':side,
+                'Close (₹)':r.CLOSE_PRICE,'Change %':(r.CLOSE_PRICE/r.PREV_CLOSE-1)*100,
+                'Status':('Closed at circuit' if closed else 'Touched only') if fixed else 'Dynamic boundary touched',
+                'Volume':r.TTL_TRD_QNTY})
+    columns=['Date','Symbol','Series','Company','Band %','Type','Direction','Close (₹)','Change %','Status','Volume']
+    return pd.DataFrame(records,columns=columns)
+
+@st.cache_data(ttl=900,show_spinner=False)
+def circuit_day_report(day):
+    import zipfile
+    stamp=day.strftime('%d%m%Y')
+    base='https://nsearchives.nseindia.com/'
+    paths=[f'products/content/sec_bhavdata_full_{stamp}.csv',
+           f'content/equities/sec_list_{stamp}.csv',
+           f'archives/equities/bhavcopy/pr/PR{day.strftime("%d%m%y")}.zip']
+    bodies=[]
+    with requests.Session() as session:
+        session.headers.update(HEADERS)
+        for path in paths:
+            r=session.get(base+path,timeout=(5,20)); r.raise_for_status(); bodies.append(r.content)
+    bhav=circuit_csv(bodies[0]); bands=circuit_csv(bodies[1])
+    # Never use reports from another date, even if a provider redirects.
+    dates=pd.to_datetime(bhav['DATE1'],format='%d-%b-%Y',errors='coerce').dt.date
+    if dates.dropna().empty or not dates.dropna().eq(day).all(): raise ValueError('Report date mismatch')
+    with zipfile.ZipFile(io.BytesIO(bodies[2])) as archive:
+        filename=next(n for n in archive.namelist() if n.lower()==f'bh{stamp}.csv')
+        hitters=circuit_csv(archive.read(filename))
+    return {'rows':circuit_join_reports(bhav,bands,hitters,day),'coverage':len(bhav),'date':day.isoformat()}
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def circuit_holidays():
+    # Holiday feed is optional: unknown missing weekdays stop verification.
+    try:
+        s=requests.Session();s.headers.update(HEADERS)
+        s.get('https://www.nseindia.com/',timeout=(5,8))
+        r=s.get('https://www.nseindia.com/api/holiday-master?type=trading',timeout=(5,12));r.raise_for_status()
+        return {pd.to_datetime(x['tradingDate'],format='%d-%b-%Y').date() for x in r.json().get('CM',[])}
+    except Exception: return set()
+
+
+def circuit_streaks(current,history,limit_reached=False):
+    out=current.copy(); labels=[]
+    for _,r in out.iterrows():
+        count=1; uncertain=False; bounded=True
+        for day,report in history:
+            if report is None: uncertain=True;bounded=False;break
+            rows=report['rows']
+            match=rows[(rows.Symbol==r.Symbol)&(rows.Series==r.Series)&(rows.Direction==r.Direction)&
+                       (rows.Type=='Fixed')&(rows.Status=='Closed at circuit')]
+            if match.empty: bounded=False;break
+            count+=1
+        if uncertain: label=f'{count}+ (earlier data unavailable)'
+        elif bounded and limit_reached: label=f'{count}+ (scan limit)'
+        else: label=str(count)
+        labels.append(label)
+    out['Consecutive trading days']=labels
+    return out
+
+
+def circuit_move_date(amount):
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    current=st.session_state.get('circuit_date',today)
+    st.session_state['circuit_date']=min(current+timedelta(days=amount),today)
+    st.session_state.pop('circuit_result',None)
+
+
+@st.cache_data(ttl=60,show_spinner=False)
+def circuit_live_snapshot():
+    with requests.Session() as session:
+        session.headers.update(HEADERS)
+        session.get('https://www.nseindia.com/',timeout=(5,8))
+        r=session.get('https://www.nseindia.com/api/live-analysis-price-band-hitter',timeout=(5,15))
+        r.raise_for_status();payload=r.json()
+    records=[]; timestamps=[]
+    for key,side in [('upper','Upper'),('lower','Lower')]:
+        section=payload.get(key,{}).get('AllSec',{})
+        if section.get('timestamp'):timestamps.append(section['timestamp'])
+        for x in section.get('data',[]):
+            band=pd.to_numeric(x.get('priceBand'),errors='coerce')
+            ltp=pd.to_numeric(x.get('ltp'),errors='coerce')
+            extreme=pd.to_numeric(x.get('highPrice' if side=='Upper' else 'lowPrice'),errors='coerce')
+            if pd.isna(ltp) or pd.isna(band):continue
+            # Official hitter feed plus LTP at the reported extreme; not a final close.
+            if not np.isclose(ltp,extreme,rtol=0,atol=0.005):continue
+            records.append({'Symbol':x.get('symbol'),'Series':x.get('series'),
+                'Reported band %':band,'Direction':side,'Latest (₹)':ltp,
+                'Change %':pd.to_numeric(x.get('pChange'),errors='coerce'),
+                'Status':'Currently at reported boundary (not final close)'})
+    if not timestamps:raise ValueError('Missing exchange timestamp')
+    stamps=pd.to_datetime(timestamps,format='%d-%b-%Y %H:%M:%S',errors='coerce')
+    if stamps.isna().any():raise ValueError('Invalid exchange timestamp')
+    return pd.DataFrame(records,columns=['Symbol','Series','Reported band %','Direction','Latest (₹)','Change %','Status']),stamps.min().to_pydatetime()
+
+
+def render_circuit_live(today):
+    with st.expander('📡 Today — current boundary snapshot',expanded=False):
+        st.caption('Separate from final closing streaks. This feed can be delayed and does not confirm trading is halted or a dynamic range was expanded.')
+        if st.button('Refresh current boundary snapshot',key='circuit_live_refresh'):
+            circuit_live_snapshot.clear()
+            try:
+                frame,stamp=circuit_live_snapshot()
+                st.session_state['circuit_live']=(frame,stamp)
+            except Exception:st.warning('NSE current feed is unavailable. Try again later.')
+        saved=st.session_state.get('circuit_live')
+        if saved:
+            frame,stamp=saved
+            st.caption(f'Exchange timestamp: {stamp:%d %b %Y %H:%M:%S} IST')
+            if stamp.date()!=today:
+                st.warning('This is an older exchange snapshot, not today’s current data.');return
+            if (datetime.now(ZoneInfo('Asia/Kolkata')).replace(tzinfo=None)-stamp).total_seconds()>900:
+                st.warning('Snapshot is over 15 minutes old. It may be an end-of-session snapshot.')
+            for band in [2,5,10,20]:
+                part=frame[frame['Reported band %'].eq(band)]
+                st.markdown(f'**{band}% reported band · {len(part)} stocks at boundary**')
+                st.dataframe(part.round(2),hide_index=True,use_container_width=True)
+
+
+def render_circuit_page():
+    st.markdown('## ⚡ Circuit & Volatility')
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    if 'circuit_date' not in st.session_state:st.session_state['circuit_date']=today
+    a,b,c,e=st.columns([1,4,1,1])
+    a.button('←',on_click=circuit_move_date,args=(-1,),key='circuit_previous',help='Previous calendar day')
+    selected=b.date_input('Report date',max_value=today,key='circuit_date')
+    c.button('→',on_click=circuit_move_date,args=(1,),key='circuit_next',disabled=selected>=today,help='Next calendar day')
+    e.button('Today',key='circuit_today',on_click=circuit_move_date,args=((today-st.session_state['circuit_date']).days,))
+    st.caption('NSE official closing reports · Reported security series · Green = upper, red = lower. Each date uses its own assigned band. Calendar arrows include weekends.')
+    st.caption('Final reports arrive after market close. An unavailable report is not interpreted as zero circuits. Intraday touching does not establish a closing circuit.')
+    if selected==today:render_circuit_live(today)
+    lookback=st.selectbox('Maximum streak verification',['10 trading days','20 trading days','60 trading days'],index=1,key='circuit_lookback')
+    limit=int(lookback.split()[0])
+    if st.button('Load / refresh circuits and streaks',type='primary',key='circuit_scan'):
+        circuit_day_report.clear()
+        holidays=circuit_holidays()
+        if selected.weekday()>=5 or selected in holidays:
+            st.info('No regular trading session on this date. Select a trading day.');return
+        with st.spinner('Reading official closing, band and band-hitter reports…'):
+            try: result=circuit_day_report(selected)
+            except Exception:
+                st.warning('The dated NSE reports are unavailable or incomplete. Today’s final reports may not yet be published. Select the previous trading day or retry later.')
+                st.link_button('Open NSE official reports','https://www.nseindia.com/all-reports');return
+        fixed=result['rows'];fixed=fixed[(fixed.Type=='Fixed')&(fixed.Status=='Closed at circuit')]
+        history=[];cursor=selected;status=st.empty()
+        # Stop once all current candidates have a verified end to their streak.
+        active={(r.Symbol,r.Series,r.Direction) for _,r in fixed.iterrows()}
+        for i in range(limit-1):
+            if not active:break
+            cursor-=timedelta(days=1)
+            while cursor.weekday()>=5 or cursor in holidays:cursor-=timedelta(days=1)
+            status.caption(f'Checking {cursor:%d %b %Y} · {len(active)} continuing streaks')
+            try: previous=circuit_day_report(cursor)
+            except Exception: previous=None
+            history.append((cursor,previous))
+            if previous is None:break
+            p=previous['rows'];p=p[(p.Type=='Fixed')&(p.Status=='Closed at circuit')]
+            keys={(r.Symbol,r.Series,r.Direction) for _,r in p.iterrows()}
+            active &= keys
+        status.empty()
+        fixed=circuit_streaks(fixed,history,bool(active) and len(history)>=limit-1)
+        st.session_state['circuit_result']={'date':selected,'report':result,'fixed':fixed,'limit':limit,
+            'loaded':datetime.now(ZoneInfo('Asia/Kolkata')).strftime('%d %b %Y %H:%M IST')}
+    saved=st.session_state.get('circuit_result')
+    if not saved or saved['date']!=selected:
+        st.info('Choose a date, then load the report.');return
+    st.caption(f"Report: {selected:%d %b %Y} · Loaded {saved['loaded']} · Streak verification up to {saved['limit']} trading days")
+    tabs=st.tabs(['📌 Closed at fixed circuit','↗ Dynamic ranges','👆 Touched during the day'])
+    rows=saved['report']['rows'];fixed=saved['fixed']
+    with tabs[0]:
+        bands=st.multiselect('Show bands',[2,5,10,20],default=[2,5,10],key='circuit_bands')
+        chosen=fixed[fixed['Band %'].isin(bands)]
+        direction=st.radio('Direction',['Both','Upper','Lower'],horizontal=True,key='circuit_direction')
+        if direction!='Both':chosen=chosen[chosen.Direction.eq(direction)]
+        metrics=st.columns(3)
+        metrics[0].metric('Closed upper',len(chosen[chosen.Direction.eq('Upper')]))
+        metrics[1].metric('Closed lower',len(chosen[chosen.Direction.eq('Lower')]))
+        metrics[2].metric('Report securities',saved['report']['coverage'])
+        st.caption('Counts are security series. Streaks continue across band changes when the same stock series closes at the same-side fixed circuit. “+” means the exact starting date could not be verified.')
+        for band in bands:
+            st.markdown(f'### {band}% circuit')
+            left,right=st.columns(2)
+            for col,side,heading in [(left,'Upper','🟢 Upper circuit'),(right,'Lower','🔴 Lower circuit')]:
+                with col:
+                    st.markdown('**'+heading+'**')
+                    part=chosen[(chosen['Band %']==band)&(chosen.Direction==side)].copy()
+                    if part.empty:st.caption('No matching closes.');continue
+                    part['_rank']=part['Consecutive trading days'].str.extract(r'^(\d+)')[0].astype(int)
+                    part=part.sort_values('_rank',ascending=False).drop(columns=['_rank','Type','Status','Date','Direction'])
+                    st.dataframe(part.round(2),hide_index=True,use_container_width=True)
+        st.download_button('Download circuit closes',chosen.to_csv(index=False),'nse_circuit_'+selected.isoformat()+'.csv','text/csv')
+    with tabs[1]:
+        dynamic=rows[rows.Type.eq('Dynamic')]
+        st.info('These securities have “No Band” in the dated NSE list and appear in the official boundary-hitter report. This confirms a boundary touch, not a halt or a range expansion. Expansion times and revised limits are not supplied by these files.')
+        st.dataframe(dynamic.drop(columns=['Band %']).round(2),hide_index=True,use_container_width=True)
+    with tabs[2]:
+        touched=rows[(rows.Type=='Fixed')&(rows.Status=='Touched only')]
+        st.caption('Touched a fixed circuit during the session, but the official closing price was away from it. Not counted in closing streaks.')
+        st.dataframe(touched.round(2),hide_index=True,use_container_width=True)
+    st.link_button('NSE original reports','https://www.nseindia.com/all-reports')
+
+
+# US market functions are separate from NSE calculations and ticker handling.
+@st.cache_data(ttl=86400, show_spinner=False)
+def us_stock_directory():
+    rows=[]
+    for filename, exchange in [('nasdaqlisted.txt','Nasdaq'),('otherlisted.txt','NYSE')]:
+        r=requests.get('https://www.nasdaqtrader.com/dynamic/SymDir/'+filename,timeout=25)
+        r.raise_for_status()
+        d=pd.read_csv(io.StringIO(r.text),sep='|',dtype=str)
+        if exchange=='NYSE':
+            d=d[d['Exchange'].eq('N')]
+        d=d[d['Test Issue'].eq('N') & d['ETF'].eq('N')]
+        symbol_col='Symbol' if exchange=='Nasdaq' else 'ACT Symbol'
+        # Listed non-ETF equities; preferred shares and warrants may be included.
+        for _, x in d.iterrows():
+            symbol=str(x[symbol_col]).strip()
+            if not symbol or symbol=='nan': continue
+            rows.append({'Symbol':symbol,'Ticker':symbol.replace('.','-'),
+                         'Company':x['Security Name'],'Exchange':exchange})
+    return pd.DataFrame(rows).drop_duplicates('Symbol').reset_index(drop=True)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def us_sp500_holdings():
+    url='https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/1467271812596.ajax?fileType=csv&fileName=IVV_holdings&dataType=fund'
+    r=requests.get(url,timeout=25); r.raise_for_status()
+    lines=r.text.splitlines()
+    start=next(i for i,line in enumerate(lines) if line.startswith('Ticker,') or line.startswith('"Ticker",'))
+    d=pd.read_csv(io.StringIO('\n'.join(lines[start:])))
+    d=d[d['Asset Class'].eq('Equity')]
+    return dict(zip(d['Ticker'].astype(str).str.replace('.', '-',regex=False),d['Sector']))
+
+
+def us_price_metrics(frame, symbol):
+    f=frame.dropna(subset=['Close']).copy()
+    if len(f)<2: return None
+    close=pd.to_numeric(f['Close'],errors='coerce'); last=float(close.iloc[-1])
+    if not np.isfinite(last) or last<=0: return None
+    result={'Ticker':symbol,'Latest ($)':last,'Price date':str(f.index[-1].date())}
+    for label,n in [('1D %',1),('1W %',5),('1M %',21),('3M %',63),('6M %',126),('1Y %',252)]:
+        result[label]=(last/float(close.iloc[-n-1])-1)*100 if len(close)>n and close.iloc[-n-1]>0 else np.nan
+    for n in [20,50,200]: result['SMA'+str(n)]=close.tail(n).mean() if len(close)>=n else np.nan
+    delta=close.diff(); gain=delta.clip(lower=0).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    loss=(-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    result['RSI14']=float((100-100/(1+gain/loss)).iloc[-1]) if loss.iloc[-1]>0 else (100.0 if gain.iloc[-1]>0 else 50.0)
+    volume=pd.to_numeric(f['Volume'],errors='coerce')
+    result['Volume']=volume.iloc[-1]
+    avg=volume.iloc[-21:-1].mean()
+    result['Volume ratio']=volume.iloc[-1]/avg if avg>0 else np.nan
+    result['52W high']=f['High'].tail(252).max(); result['52W low']=f['Low'].tail(252).min()
+    return result
+
+@st.cache_data(ttl=900, show_spinner=False)
+def us_download_batch(symbols):
+    data=yf.download(list(symbols),period='2y',interval='1d',auto_adjust=True,
+                     group_by='ticker',threads=4,progress=False,timeout=15)
+    rows=[]
+    for symbol in symbols:
+        try:
+            f=data[symbol] if isinstance(data.columns,pd.MultiIndex) else data
+            row=us_price_metrics(f,symbol)
+            if row: rows.append(row)
+        except (KeyError,ValueError,TypeError,IndexError): pass
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def us_detail(symbol):
+    stock=yf.Ticker(symbol)
+    history=stock.history(period='2y',auto_adjust=True)
+    try: info=stock.get_info()
+    except Exception: info={}
+    try: news=stock.get_news(count=8)
+    except Exception: news=[]
+    return history,info,news
+
+
+def us_heatmap(frame, group, title):
+    import plotly.express as px
+    d=frame.dropna(subset=['1D %']).copy()
+    if d.empty: st.info('No price changes available for this heatmap.'); return
+    d['Tile size']=1
+    fig=px.treemap(d,path=[group,'Symbol'],values='Tile size',color='1D %',
+                   color_continuous_scale=['#b91c1c','#182334','#15803d'],color_continuous_midpoint=0,
+                   hover_data=['Company','Latest ($)','1D %'],title=title)
+    fig.update_traces(texttemplate='%{label}<br>%{color:.2f}%')
+    fig.update_layout(height=530,margin=dict(t=45,l=0,r=0,b=0),paper_bgcolor='#0b1523',font_color='#e2e8f0')
+    st.plotly_chart(fig,use_container_width=True)
+
+
+def render_us_market():
+    st.markdown('## 🇺🇸 All US Stocks')
+    st.caption('NYSE + Nasdaq · USD · Daily Yahoo Finance prices (may be delayed). This page uses separate US data.')
+    scope=st.selectbox('Stock universe',['All NYSE + Nasdaq','NYSE only','Nasdaq only','S&P 500'])
+    c1,c2=st.columns(2)
+    reload_directory=c1.button('Refresh stock directory',key='us_directory_refresh')
+    if reload_directory:
+        us_stock_directory.clear(); us_sp500_holdings.clear()
+    try:
+        directory=us_stock_directory()
+    except Exception as e:
+        st.error('US listing source is unavailable. Try Refresh stock directory again.'); return
+    try: sectors=us_sp500_holdings()
+    except Exception: sectors={}
+    directory['Sector']=directory['Ticker'].map(sectors).fillna('Unclassified')
+    if scope=='NYSE only': directory=directory[directory.Exchange.eq('NYSE')]
+    elif scope=='Nasdaq only': directory=directory[directory.Exchange.eq('Nasdaq')]
+    elif scope=='S&P 500':
+        if not sectors: st.error('S&P 500 holdings source unavailable. Please retry later.'); return
+        directory=directory[directory.Ticker.isin(sectors)]
+        st.caption('S&P 500 membership / sectors use the iShares IVV equity holdings as a constituent proxy.')
+    st.caption(f'{len(directory):,} listed non-ETF equities. Listings can include preferred shares or warrants. Sector labels cover IVV holdings; other listings are Unclassified.')
+    st.download_button('Download selected stock directory',directory.to_csv(index=False),'us_stock_directory.csv','text/csv')
+    load=c2.button('Load / refresh all selected prices',type='primary',key='us_prices_refresh')
+    if load:
+        us_download_batch.clear()
+        frames=[]; errors=0; symbols=directory.Ticker.tolist(); progress=st.progress(0)
+        status=st.empty()
+        for start in range(0,len(symbols),100):
+            status.caption(f'Loading {start+1:,}–{min(start+100,len(symbols)):,} of {len(symbols):,}. Full US coverage can take several minutes.')
+            try: frames.append(us_download_batch(tuple(symbols[start:start+100])))
+            except Exception: errors+=1
+            progress.progress(min((start+100)/max(len(symbols),1),1.0))
+        prices=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
+        st.session_state['us_snapshot']={'scope':scope,'prices':prices,'loaded':datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d %H:%M %Z'),'errors':errors}
+        status.empty(); progress.empty()
+    saved=st.session_state.get('us_snapshot')
+    if not saved or saved['scope']!=scope:
+        st.info('Click Load / refresh all selected prices to build this universe. No stock-count limit is applied.'); return
+    prices=saved['prices']
+    if prices.empty: st.warning('No prices returned. The provider may be rate limiting requests. Try again later.'); return
+    d=directory.merge(prices,on='Ticker',how='inner')
+    if d.empty: st.warning('The directory changed. Reload prices.'); return
+    asof=d['Price date'].max(); latest=d[d['Price date'].eq(asof)&d.Volume.gt(0)]
+    st.caption(f"Loaded {saved['loaded']} · {len(d):,}/{len(directory):,} stocks have prices · Breadth uses {len(latest):,} traded stocks dated {asof}. Prices are split/dividend adjusted.")
+    missing=directory[~directory.Ticker.isin(d.Ticker)]
+    if not missing.empty:
+        st.warning(f'{len(missing):,} listings have no usable prices. These are excluded from heatmaps and statistics.')
+        st.download_button('Download unavailable listings',missing.to_csv(index=False),'us_unavailable.csv','text/csv')
+    cols=st.columns(5)
+    for col,label,value in zip(cols,['Priced stocks','Advancing','Declining','Unchanged','At 52W high'],[len(d),latest['1D %'].gt(0).sum(),latest['1D %'].lt(0).sum(),latest['1D %'].eq(0).sum(),latest['Latest ($)'].ge(latest['52W high']*.999).sum()]): col.metric(label,f'{value:,}')
+    heat,table,report=st.tabs(['🔥 Heatmaps','📊 Table / Smart Scanner','🔎 Stock Report'])
+    with heat:
+        indices=us_download_batch(('^GSPC','^IXIC','^DJI','^RUT'))
+        if not indices.empty:
+            names={'^GSPC':'S&P 500','^IXIC':'Nasdaq Composite','^DJI':'Dow Jones','^RUT':'Russell 2000'}
+            for col,(_,row) in zip(st.columns(len(indices)),indices.iterrows()):
+                col.metric(names.get(row.Ticker,row.Ticker),f'{row["Latest ($)"]:,.2f}',f'{row["1D %"]:+.2f}%')
+        mode=st.radio('Group heatmap by',['Exchange','Sector'],horizontal=True)
+        st.caption('Equal-size stock tiles; colour shows daily % change. Sector coverage is limited to classified stocks. Index cards describe the wider market.')
+        us_heatmap(latest,mode,'US stock daily performance')
+        if mode=='Sector':
+            classified=latest[latest.Sector.ne('Unclassified')]
+            if not classified.empty:
+                sector=classified.groupby('Sector')['1D %'].mean().sort_values()
+                st.bar_chart(sector)
+                st.caption('Sector bars are equal-weight averages of classified stocks in the selected universe.')
+    with table:
+        style=st.radio('View',['Classic Table','Smart Scanner'],horizontal=True,key='us_table_mode')
+        search=st.text_input('Search stock symbol or company',key='us_search')
+        filtered=d.copy()
+        if search: filtered=filtered[filtered.Symbol.str.contains(search,case=False,regex=False)|filtered.Company.str.contains(search,case=False,regex=False)]
+        if style=='Smart Scanner':
+            a,b,c=st.columns(3)
+            trend=a.selectbox('Trend',['All','Above SMA50','Above SMA200','Below SMA200'])
+            min_volume=b.number_input('Minimum daily volume',min_value=0,value=0,step=100000)
+            rsi=c.slider('RSI range',0,100,(0,100))
+            filtered=filtered[filtered.Volume.ge(min_volume)&filtered.RSI14.between(*rsi)]
+            if trend=='Above SMA50': filtered=filtered[filtered['Latest ($)']>filtered.SMA50]
+            elif trend=='Above SMA200': filtered=filtered[filtered['Latest ($)']>filtered.SMA200]
+            elif trend=='Below SMA200': filtered=filtered[filtered['Latest ($)']<filtered.SMA200]
+        a,b=st.columns(2)
+        rank=a.selectbox('Sort by',['1D %','1W %','1M %','3M %','6M %','1Y %','Volume','Volume ratio','RSI14','Latest ($)'])
+        ascending=b.selectbox('Order',['Highest first','Lowest first'])=='Lowest first'
+        filtered=filtered.sort_values(rank,ascending=ascending,na_position='last')
+        st.caption(f'{len(filtered):,} matching stocks')
+        st.dataframe(filtered.drop(columns=['Ticker']).round(2),use_container_width=True,hide_index=True,height=550)
+        st.download_button('Export US scan',filtered.to_csv(index=False),'us_stock_scan.csv','text/csv')
+    with report:
+        choices=directory.Ticker.tolist()
+        companies=directory.set_index('Ticker').Company.to_dict()
+        symbol=st.selectbox('Select a US stock',choices,format_func=lambda x:f'{x} — {companies.get(x,"")}',key='us_report_stock')
+        if st.button('Get stock report',key='us_report_load'):
+            with st.spinner('Loading stock report…'):
+                try:
+                    history,info,news=us_detail(symbol)
+                    st.subheader(info.get('longName',companies.get(symbol,symbol)))
+                    if not history.empty: st.line_chart(history['Close'])
+                    fields=st.columns(4)
+                    for col,label,key in zip(fields,['Market cap ($)','Trailing P/E','Sector','Industry'],['marketCap','trailingPE','sector','industry']): col.metric(label,str(info.get(key,'Unavailable')))
+                    if info.get('longBusinessSummary'): st.write(info['longBusinessSummary'])
+                    st.markdown('### Available news')
+                    count=0
+                    for item in news:
+                        content=item.get('content',item); title=content.get('title')
+                        link=(content.get('canonicalUrl') or {}).get('url') or content.get('link')
+                        if title:
+                            st.write(title)
+                            if link and link.startswith('https://'): st.link_button('Read source',link)
+                            count+=1
+                    if not count: st.info('No matching news returned by the provider.')
+                    st.link_button('Open Yahoo Finance',f'https://finance.yahoo.com/quote/{symbol}/')
+                except Exception: st.error('Stock report is temporarily unavailable. Try again later.')
+
+
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
@@ -2129,6 +2565,10 @@ elif page=="🌐 All NSE Performance":
                 if a2.button("Open Pro Analyzer →",type="primary",use_container_width=True,key="smart_open"):
                     st.query_params.clear();st.query_params["page"]="pro";st.query_params["stock"]=selected;st.rerun()
                 st.download_button("⬇️ Export Smart Scan CSV",d.to_csv(index=False).encode(),"nse_smart_scan.csv","text/csv")
+elif page=="⚡ Circuit & Volatility":
+    render_circuit_page()
+elif page=="🇺🇸 All US Stocks":
+    render_us_market()
 elif page=="🏦 Institutional Watch":
     st.markdown("## 🏦 Institutional / FII-DII Watch")
     st.warning("Price/volume cannot prove FII/DII buying. This page separates verified ownership/deal evidence from technical participation.")
