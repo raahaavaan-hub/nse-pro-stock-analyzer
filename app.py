@@ -1264,7 +1264,7 @@ def render_circuit_page():
     st.caption('NSE official closing reports · Reported security series · Green = upper, red = lower. Each date uses its own assigned band. Calendar arrows include weekends.')
     st.caption('Final reports arrive after market close. An unavailable report is not interpreted as zero circuits. Intraday touching does not establish a closing circuit.')
     if selected==today:render_circuit_live(today)
-    lookback=st.selectbox('Maximum streak verification',['10 trading days','20 trading days','60 trading days'],index=1,key='circuit_lookback')
+    lookback=st.selectbox('Maximum streak verification',['1 trading day','2 trading days','5 trading days','10 trading days','20 trading days','60 trading days'],index=4,key='circuit_lookback')
     limit=int(lookback.split()[0])
     if st.button('Load / refresh circuits and streaks',type='primary',key='circuit_scan'):
         circuit_day_report.clear()
@@ -1355,15 +1355,38 @@ def us_stock_directory():
                          'Company':x['Security Name'],'Exchange':exchange})
     return pd.DataFrame(rows).drop_duplicates('Symbol').reset_index(drop=True)
 
+def us_parse_holdings(text):
+    import csv
+    lines=text.lstrip('\ufeff').splitlines()
+    start=next((i for i,line in enumerate(lines)
+                if [x.strip() for x in next(csv.reader([line]),[])] and
+                next(csv.reader([line]),[])[0].strip()=='Ticker'),None)
+    if start is None:raise ValueError('Source did not return a holdings CSV')
+    d=pd.read_csv(io.StringIO('\n'.join(lines[start:])),on_bad_lines='skip')
+    d.columns=d.columns.str.strip()
+    if not {'Ticker','Sector','Asset Class'}.issubset(d.columns):raise ValueError('Missing holdings columns')
+    d=d[d['Asset Class'].astype(str).str.strip().eq('Equity')]
+    ticker=d['Ticker'].astype(str).str.strip().str.replace(r'[.\s]+','-',regex=True)
+    valid=ticker.str.fullmatch(r'[A-Z0-9]+(?:-[A-Z0-9]+)*')
+    result=dict(zip(ticker[valid],d.loc[valid,'Sector'].fillna('Unclassified')))
+    if len(result)<450:raise ValueError('Incomplete S&P 500 holdings download')
+    return result
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def us_sp500_holdings():
-    url='https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/1467271812596.ajax?fileType=csv&fileName=IVV_holdings&dataType=fund'
-    r=requests.get(url,timeout=25); r.raise_for_status()
-    lines=r.text.splitlines()
-    start=next(i for i,line in enumerate(lines) if line.startswith('Ticker,') or line.startswith('"Ticker",'))
-    d=pd.read_csv(io.StringIO('\n'.join(lines[start:])))
-    d=d[d['Asset Class'].eq('Equity')]
-    return dict(zip(d['Ticker'].astype(str).str.replace('.', '-',regex=False),d['Sector']))
+    urls=[
+      'https://www.ishares.com/us/products/239726/ishares-core-s-p-500-etf/latest-holdings.csv',
+      'https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf-ivv/1467271812596.ajax?fileType=csv&fileName=IVV_holdings&dataType=fund'
+    ]
+    errors=[]
+    with requests.Session() as session:
+        session.headers.update({'User-Agent':'Mozilla/5.0','Accept':'text/csv,*/*'})
+        for url in urls:
+            try:
+                r=session.get(url,timeout=(5,25));r.raise_for_status()
+                return us_parse_holdings(r.content.decode('utf-8-sig',errors='replace'))
+            except Exception as exc:errors.append(type(exc).__name__)
+    raise ValueError('Holdings sources unavailable: '+', '.join(errors))
 
 
 def us_price_metrics(frame, symbol):
@@ -1372,8 +1395,11 @@ def us_price_metrics(frame, symbol):
     close=pd.to_numeric(f['Close'],errors='coerce'); last=float(close.iloc[-1])
     if not np.isfinite(last) or last<=0: return None
     result={'Ticker':symbol,'Latest ($)':last,'Price date':str(f.index[-1].date())}
-    for label,n in [('1D %',1),('1W %',5),('1M %',21),('3M %',63),('6M %',126),('1Y %',252)]:
+    for label,n in [('1D %',1),('2D %',2),('1W %',5),('1M %',21),('3M %',63),('6M %',126),('1Y %',252)]:
         result[label]=(last/float(close.iloc[-n-1])-1)*100 if len(close)>n and close.iloc[-n-1]>0 else np.nan
+    span=(f.index[-1]-f.index[0]).days
+    result['5Y %']=(last/float(close.iloc[0])-1)*100 if span>=1780 and close.iloc[0]>0 else np.nan
+    result['Daily high']=f['High'].iloc[-1];result['Daily low']=f['Low'].iloc[-1]
     for n in [20,50,200]: result['SMA'+str(n)]=close.tail(n).mean() if len(close)>=n else np.nan
     delta=close.diff(); gain=delta.clip(lower=0).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
     loss=(-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
@@ -1386,8 +1412,8 @@ def us_price_metrics(frame, symbol):
     return result
 
 @st.cache_data(ttl=900, show_spinner=False)
-def us_download_batch(symbols):
-    data=yf.download(list(symbols),period='2y',interval='1d',auto_adjust=True,
+def us_download_batch(symbols,period="2y"):
+    data=yf.download(list(symbols),period=period,interval='1d',auto_adjust=True,
                      group_by='ticker',threads=4,progress=False,timeout=15)
     rows=[]
     for symbol in symbols:
@@ -1426,6 +1452,10 @@ def render_us_market():
     st.markdown('## 🇺🇸 All US Stocks')
     st.caption('NYSE + Nasdaq · USD · Daily Yahoo Finance prices (may be delayed). This page uses separate US data.')
     scope=st.selectbox('Stock universe',['All NYSE + Nasdaq','NYSE only','Nasdaq only','S&P 500'])
+    controls=st.columns(3)
+    history=controls[0].selectbox('History',['1y','2y','5y'],index=2,key='us_history')
+    rank=controls[1].selectbox('Sort by',['Latest ($)','1D %','2D %','1W %','1M %','3M %','6M %','1Y %','5Y %','Volume','Volume ratio','RSI14'],key='us_rank')
+    ascending=controls[2].selectbox('Order',['Largest → Smallest','Smallest → Largest'],key='us_order')=='Smallest → Largest'
     c1,c2=st.columns(2)
     reload_directory=c1.button('Refresh stock directory',key='us_directory_refresh')
     if reload_directory:
@@ -1445,22 +1475,22 @@ def render_us_market():
         st.caption('S&P 500 membership / sectors use the iShares IVV equity holdings as a constituent proxy.')
     st.caption(f'{len(directory):,} listed non-ETF equities. Listings can include preferred shares or warrants. Sector labels cover IVV holdings; other listings are Unclassified.')
     st.download_button('Download selected stock directory',directory.to_csv(index=False),'us_stock_directory.csv','text/csv')
-    load=c2.button('Load / refresh all selected prices',type='primary',key='us_prices_refresh')
+    load=c2.button('📊 Build / Refresh Classic Table',type='primary',key='us_prices_refresh')
     if load:
         us_download_batch.clear()
         frames=[]; errors=0; symbols=directory.Ticker.tolist(); progress=st.progress(0)
         status=st.empty()
         for start in range(0,len(symbols),100):
             status.caption(f'Loading {start+1:,}–{min(start+100,len(symbols)):,} of {len(symbols):,}. Full US coverage can take several minutes.')
-            try: frames.append(us_download_batch(tuple(symbols[start:start+100])))
+            try: frames.append(us_download_batch(tuple(symbols[start:start+100]),history))
             except Exception: errors+=1
             progress.progress(min((start+100)/max(len(symbols),1),1.0))
         prices=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
-        st.session_state['us_snapshot']={'scope':scope,'prices':prices,'loaded':datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d %H:%M %Z'),'errors':errors}
+        st.session_state['us_snapshot']={'scope':scope,'history':history,'prices':prices,'loaded':datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d %H:%M %Z'),'errors':errors}
         status.empty(); progress.empty()
     saved=st.session_state.get('us_snapshot')
-    if not saved or saved['scope']!=scope:
-        st.info('Click Load / refresh all selected prices to build this universe. No stock-count limit is applied.'); return
+    if not saved or saved['scope']!=scope or saved.get('history')!=history:
+        st.info('Click Build / Refresh Classic Table to load the selected universe and history. No stock-count limit is applied.'); return
     prices=saved['prices']
     if prices.empty: st.warning('No prices returned. The provider may be rate limiting requests. Try again later.'); return
     d=directory.merge(prices,on='Ticker',how='inner')
@@ -1471,25 +1501,46 @@ def render_us_market():
     if not missing.empty:
         st.warning(f'{len(missing):,} listings have no usable prices. These are excluded from heatmaps and statistics.')
         st.download_button('Download unavailable listings',missing.to_csv(index=False),'us_unavailable.csv','text/csv')
-    cols=st.columns(5)
-    for col,label,value in zip(cols,['Priced stocks','Advancing','Declining','Unchanged','At 52W high'],[len(d),latest['1D %'].gt(0).sum(),latest['1D %'].lt(0).sum(),latest['1D %'].eq(0).sum(),latest['Latest ($)'].ge(latest['52W high']*.999).sum()]): col.metric(label,f'{value:,}')
+    st.markdown('### US Market Statistics')
+    st.caption('Calculated from available prices in the selected universe; not an official exchange-wide live feed.')
+    stats=[('Stocks traded',len(latest)),('Advances',latest['1D %'].gt(0).sum()),
+           ('Declines',latest['1D %'].lt(0).sum()),('Unchanged',latest['1D %'].eq(0).sum()),
+           ('52W high',latest['Daily high'].ge(latest['52W high']).sum()),
+           ('52W low',latest['Daily low'].le(latest['52W low']).sum()),
+           ('Above SMA200',(latest['Latest ($)']>latest.SMA200).sum()),
+           ('Volume ≥ 2× average',latest['Volume ratio'].ge(2).sum())]
+    for start in [0,4]:
+        for col,(label,value) in zip(st.columns(4),stats[start:start+4]):col.metric(label,f'{value:,}')
+    st.caption('52-week extremes use up to 252 available sessions; recently listed stocks have shorter histories. US volatility cards use trend / volume, not Indian fixed-circuit rules.')
     heat,table,report=st.tabs(['🔥 Heatmaps','📊 Table / Smart Scanner','🔎 Stock Report'])
     with heat:
-        indices=us_download_batch(('^GSPC','^IXIC','^DJI','^RUT'))
-        if not indices.empty:
-            names={'^GSPC':'S&P 500','^IXIC':'Nasdaq Composite','^DJI':'Dow Jones','^RUT':'Russell 2000'}
-            for col,(_,row) in zip(st.columns(len(indices)),indices.iterrows()):
-                col.metric(names.get(row.Ticker,row.Ticker),f'{row["Latest ($)"]:,.2f}',f'{row["1D %"]:+.2f}%')
-        mode=st.radio('Group heatmap by',['Exchange','Sector'],horizontal=True)
-        st.caption('Equal-size stock tiles; colour shows daily % change. Sector coverage is limited to classified stocks. Index cards describe the wider market.')
-        us_heatmap(latest,mode,'US stock daily performance')
-        if mode=='Sector':
-            classified=latest[latest.Sector.ne('Unclassified')]
-            if not classified.empty:
-                sector=classified.groupby('Sector')['1D %'].mean().sort_values()
-                st.bar_chart(sector)
-                st.caption('Sector bars are equal-weight averages of classified stocks in the selected universe.')
+        st.markdown('### 🟩 Heat Map')
+        mode=st.radio('Choose heat map',['Broad Market Indices','Sectoral Indices','Stocks by Exchange','Stocks by Sector'],horizontal=True,key='us_heatmap_mode')
+        if mode in ['Broad Market Indices','Sectoral Indices']:
+            names=({'^GSPC':'S&P 500','^IXIC':'Nasdaq Composite','^DJI':'Dow Jones','^RUT':'Russell 2000'} if mode=='Broad Market Indices' else
+                   {'XLK':'Technology','XLF':'Financials','XLE':'Energy','XLV':'Health Care','XLY':'Consumer Discretionary','XLP':'Consumer Staples','XLI':'Industrials','XLB':'Materials','XLU':'Utilities','XLRE':'Real Estate','XLC':'Communication'})
+            try: indices=us_download_batch(tuple(names))
+            except Exception:indices=pd.DataFrame()
+            if indices.empty:st.info('Index / sector price source is temporarily unavailable.')
+            else:
+                st.caption('Sector ETFs are proxies for S&P 500 sectors.' if mode=='Sectoral Indices' else 'Broad market indices are independent of the selected stock universe.')
+                for start in range(0,len(indices),4):
+                    for col,(_,row) in zip(st.columns(4),indices.iloc[start:start+4].iterrows()):
+                        change=row['1D %'];colour='#14532d' if change>=0 else '#7f1d1d'
+                        with col:
+                            st.markdown(f'<div style="background:{colour};padding:18px;border-radius:12px;margin-bottom:12px"><b>{html.escape(names.get(row.Ticker,row.Ticker))}</b><br><strong>{row["Latest ($)"]:,.2f}</strong><br>{change:+.2f}%<br><small>{row["Price date"]}</small></div>',unsafe_allow_html=True)
+        else:
+            group='Exchange' if mode=='Stocks by Exchange' else 'Sector'
+            st.caption('Equal-size stock tiles; colour shows daily % change. Sector labels cover S&P 500 holdings; other stocks are Unclassified.')
+            us_heatmap(latest,group,'US stock daily performance')
+            if group=='Sector':
+                classified=latest[latest.Sector.ne('Unclassified')]
+                if not classified.empty:
+                    st.bar_chart(classified.groupby('Sector')['1D %'].mean().sort_values())
+                    st.caption('Equal-weight sector averages for classified stocks in the selected universe.')
     with table:
+        st.markdown('### 📋 Classic Performance Table / Smart Scanner')
+        st.caption(f'Selected history: {history} · Sort: {rank}. Change history above, then rebuild prices.')
         style=st.radio('View',['Classic Table','Smart Scanner'],horizontal=True,key='us_table_mode')
         search=st.text_input('Search stock symbol or company',key='us_search')
         filtered=d.copy()
@@ -1503,12 +1554,9 @@ def render_us_market():
             if trend=='Above SMA50': filtered=filtered[filtered['Latest ($)']>filtered.SMA50]
             elif trend=='Above SMA200': filtered=filtered[filtered['Latest ($)']>filtered.SMA200]
             elif trend=='Below SMA200': filtered=filtered[filtered['Latest ($)']<filtered.SMA200]
-        a,b=st.columns(2)
-        rank=a.selectbox('Sort by',['1D %','1W %','1M %','3M %','6M %','1Y %','Volume','Volume ratio','RSI14','Latest ($)'])
-        ascending=b.selectbox('Order',['Highest first','Lowest first'])=='Lowest first'
         filtered=filtered.sort_values(rank,ascending=ascending,na_position='last')
         st.caption(f'{len(filtered):,} matching stocks')
-        st.dataframe(filtered.drop(columns=['Ticker']).round(2),use_container_width=True,hide_index=True,height=550)
+        st.dataframe(filtered.drop(columns=['Ticker','Daily high','Daily low']).round(2),use_container_width=True,hide_index=True,height=550)
         st.download_button('Export US scan',filtered.to_csv(index=False),'us_stock_scan.csv','text/csv')
     with report:
         choices=directory.Ticker.tolist()
