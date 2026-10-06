@@ -1252,8 +1252,30 @@ def render_circuit_live(today):
                 st.dataframe(part.round(2),hide_index=True,use_container_width=True)
 
 
+def circuit_readable_rows(rows):
+    """Full-width wrapped rows; compact stacked cards on phone screens."""
+    cards=[]
+    def number(value,digits=2):
+        try:return f'{float(value):,.{digits}f}' if pd.notna(value) else '—'
+        except (TypeError,ValueError):return '—'
+    for _,r in rows.iterrows():
+        cells=[('<b>'+html.escape(str(r.Symbol))+'</b><small>'+html.escape(str(r.Company))+' · '+html.escape(str(r.Series))+'</small>','Stock'),
+               (number(r['Close (₹)']),'Close ₹'),(number(r['Change %'])+'%','Change'),
+               (html.escape(str(r['Consecutive trading days'])),'Trading days'),(number(r.Volume,0),'Volume')]
+        cards.append('<tr>'+''.join('<td data-label="'+label+'">'+value+'</td>' for value,label in cells)+'</tr>')
+    st.markdown('<div class="circuit-readable"><table><thead><tr><th>Stock / Company</th><th>Close ₹</th><th>Change</th><th>Consecutive days</th><th>Volume</th></tr></thead><tbody>'+''.join(cards)+'</tbody></table></div>',unsafe_allow_html=True)
+
+
 def render_circuit_page():
     st.markdown('## ⚡ Circuit & Volatility')
+    st.markdown("""<style>
+    .circuit-readable{width:100%;margin-bottom:20px}
+    .circuit-readable table{width:100%;table-layout:fixed;border-collapse:collapse;background:#0b1523;color:#e2e8f0}
+    .circuit-readable th,.circuit-readable td{padding:12px 10px;text-align:left;border-bottom:1px solid #253349;white-space:normal;overflow-wrap:anywhere;font-size:13px}
+    .circuit-readable th:first-child{width:38%}.circuit-readable th{font-size:12px;color:#94a3b8}
+    .circuit-readable small{display:block;color:#94a3b8;font-size:11px;margin-top:5px;line-height:1.5}
+    @media(max-width:650px){.circuit-readable table,.circuit-readable tbody{display:block;width:100%}.circuit-readable thead{display:none}.circuit-readable tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);background:#0d1726;border:1px solid #253349;border-radius:12px;margin:10px 0;padding:8px}.circuit-readable td{display:block;border:0;min-width:0;padding:8px}.circuit-readable td:first-child{grid-column:1 / -1}.circuit-readable td:not(:first-child)::before{content:attr(data-label);display:block;font-size:11px;color:#94a3b8;margin-bottom:4px}}
+    </style>""",unsafe_allow_html=True)
     today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
     if 'circuit_date' not in st.session_state:st.session_state['circuit_date']=today
     a,b,c,e=st.columns([1,4,1,1])
@@ -1312,17 +1334,18 @@ def render_circuit_page():
         metrics[1].metric('Closed lower',len(chosen[chosen.Direction.eq('Lower')]))
         metrics[2].metric('Report securities',saved['report']['coverage'])
         st.caption('Counts are security series. Streaks continue across band changes when the same stock series closes at the same-side fixed circuit. “+” means the exact starting date could not be verified.')
-        for band in bands:
-            st.markdown(f'### {band}% circuit')
-            left,right=st.columns(2)
-            for col,side,heading in [(left,'Upper','🟢 Upper circuit'),(right,'Lower','🔴 Lower circuit')]:
-                with col:
-                    st.markdown('**'+heading+'**')
-                    part=chosen[(chosen['Band %']==band)&(chosen.Direction==side)].copy()
-                    if part.empty:st.caption('No matching closes.');continue
-                    part['_rank']=part['Consecutive trading days'].str.extract(r'^(\d+)')[0].astype(int)
-                    part=part.sort_values('_rank',ascending=False).drop(columns=['_rank','Type','Status','Date','Direction'])
-                    st.dataframe(part.round(2),hide_index=True,use_container_width=True)
+        for side,heading in [('Upper','🟢 Upper circuits'),('Lower','🔴 Lower circuits')]:
+            if direction!='Both' and direction!=side:continue
+            st.markdown('## '+heading)
+            side_rows=chosen[chosen.Direction.eq(side)]
+            st.caption(f'{len(side_rows)} stocks · {selected:%d %b %Y}')
+            for band in bands:
+                part=side_rows[side_rows['Band %'].eq(band)].copy()
+                st.markdown(f'### {band}% circuit · {len(part)} stocks')
+                if part.empty:st.caption('No matching closes.');continue
+                part['_rank']=part['Consecutive trading days'].str.extract(r'^(\d+)')[0].astype(int)
+                part=part.sort_values('_rank',ascending=False)
+                circuit_readable_rows(part)
         st.download_button('Download circuit closes',chosen.to_csv(index=False),'nse_circuit_'+selected.isoformat()+'.csv','text/csv')
     with tabs[1]:
         dynamic=rows[rows.Type.eq('Dynamic')]
