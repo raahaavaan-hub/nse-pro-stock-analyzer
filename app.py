@@ -923,43 +923,68 @@ def nse_all_indices():
     except Exception:
         return []
 
-@st.cache_data(ttl=300, show_spinner=False)
+def _nse_statistics_count(value):
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip().replace(",", "")
+    if not re.fullmatch(r"[0-9]+(?:\.0+)?", text):
+        return None
+    return int(float(text))
+
+
+def _parse_nse_market_statistics(payload):
+    """Parse the exact fields used by NSE's current homepage component."""
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return {"source": "Unavailable", "error": "Unexpected NSE response format."}
+    mapping = {
+        "stock_traded": ("snapshotCapitalMarket", "total"),
+        "advances": ("snapshotCapitalMarket", "advances"),
+        "declines": ("snapshotCapitalMarket", "declines"),
+        "unchanged": ("snapshotCapitalMarket", "unchange"),
+        "high52": ("fiftyTwoWeek", "high"),
+        "low52": ("fiftyTwoWeek", "low"),
+        "upper": ("circuit", "upper"),
+        "lower": ("circuit", "lower"),
+    }
+    out = {}
+    for key, (section, field) in mapping.items():
+        values = data.get(section, {})
+        out[key] = _nse_statistics_count(values.get(field)) if isinstance(values, dict) else None
+    if all(out[k] is None for k in mapping):
+        return {"source": "Unavailable", "error": "NSE returned no statistics."}
+    out.update(source="NSE", as_on=str(data.get("asOnDate") or data.get("timestamp") or "Timestamp not supplied"))
+    return out
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def nse_market_statistics():
-    """
-    Best-effort parse of NSE's official homepage Market Statistics.
-    Returns source='NSE' only when all four breadth figures are successfully parsed.
-    """
+    """Read NSE's JSON feed instead of its JavaScript-rendered HTML placeholders."""
     try:
-        s=requests.Session()
-        s.headers.update({
-            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-            "Accept-Language":"en-US,en;q=0.9",
-            "Referer":"https://www.nseindia.com/"
-        })
-        r=s.get("https://www.nseindia.com/?view=desktop",timeout=15)
-        r.raise_for_status()
-        txt=re.sub(r"\s+"," ",re.sub(r"<[^>]+>"," ",r.text))
-        labels={
-            "stock_traded":"Stock Traded",
-            "advances":"Advances",
-            "declines":"Declines",
-            "unchanged":"Unchanged",
-            "high52":"No. of Stocks at 52 Week High",
-            "low52":"No. of Stocks at 52 Week Low",
-            "upper":"No. of Stocks in Upper Circuit",
-            "lower":"No. of Stocks in Lower Circuit"
-        }
-        out={}
-        for key,label in labels.items():
-            m=re.search(re.escape(label)+r".{0,120}?([0-9][0-9,]*)",txt,re.I)
-            if m:
-                out[key]=int(m.group(1).replace(",",""))
-        tm=re.search(r"As on\s+([0-9]{1,2}-[A-Za-z]{3}-[0-9]{4}\s+[0-9]{1,2}:[0-9]{2}\s+IST)",txt,re.I)
-        if tm: out["as_on"]=tm.group(1)
-        out["source"]="NSE" if all(k in out for k in ["stock_traded","advances","declines","unchanged"]) else "Unavailable"
-        return out
-    except Exception:
-        return {"source":"Unavailable"}
+        with requests.Session() as session:
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "application/json,text/plain,*/*",
+                "Referer": "https://www.nseindia.com/",
+            })
+            session.get("https://www.nseindia.com/", timeout=(5, 10))
+            response = session.get(
+                "https://www.nseindia.com/api/NextApi/apiClient",
+                params={"functionName": "getMarketStatistics"}, timeout=(5, 15),
+            )
+            response.raise_for_status()
+            return _parse_nse_market_statistics(response.json())
+    except requests.exceptions.HTTPError as exc:
+        return {"source": "Unavailable", "error": f"NSE returned HTTP {exc.response.status_code}."}
+    except requests.exceptions.Timeout:
+        return {"source": "Unavailable", "error": "NSE request timed out."}
+    except Exception as exc:
+        return {"source": "Unavailable", "error": f"NSE request failed ({type(exc).__name__})."}
+
+
+def _nse_stat_display(value):
+    return "—" if value is None else f"{value:,}"
 
 def _index_lookup(rows):
     return {str(r.get("name","")).upper():r for r in rows}
@@ -1891,33 +1916,27 @@ elif page=="🌐 All NSE Performance":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE PERFORMANCE</div><h1>🌐 All NSE Performance</h1><p>Start with market statistics, then explore heat maps, then choose Classic Table or Smart Scanner.</p></div>",unsafe_allow_html=True)
 
     st.markdown("## 📊 Market Statistics")
-    official_stats=nse_market_statistics()
-
-    if official_stats.get("source")=="NSE":
-        total_traded=official_stats.get("stock_traded",0)
-        advances=official_stats.get("advances",0)
-        declines=official_stats.get("declines",0)
-        unchanged=official_stats.get("unchanged",0)
-        high52=official_stats.get("high52",0)
-        low52=official_stats.get("low52",0)
-        upper_circuit=official_stats.get("upper",0)
-        lower_circuit=official_stats.get("lower",0)
-        as_on=official_stats.get("as_on","Latest NSE update")
-        st.caption(f"Official NSE Market Statistics · {as_on}")
+    if st.button("↻ Refresh market statistics", key="refresh_nse_market_statistics"):
+        nse_market_statistics.clear()
+    official_stats = nse_market_statistics()
+    stale = False
+    if official_stats.get("source") == "NSE":
+        st.session_state["nse_last_good_statistics"] = dict(official_stats)
+    elif st.session_state.get("nse_last_good_statistics"):
+        error = official_stats.get("error", "NSE is unavailable.")
+        official_stats = dict(st.session_state["nse_last_good_statistics"])
+        stale = True
+        st.warning(f"{error} Showing the last successful snapshot below; it is not live. Click Refresh to retry.")
     else:
-        st.warning("Official NSE Market Statistics could not be fetched right now. I am not showing an estimated substitute, so the numbers will not mislead you.")
-        total_traded=advances=declines=unchanged=high52=low52=upper_circuit=lower_circuit=0
-
-    s1,s2,s3,s4=st.columns(4)
-    s1.metric("Stock Traded",f"{total_traded:,}" if total_traded else "—")
-    s2.metric("Advances",f"{advances:,}" if advances else "—")
-    s3.metric("Declines",f"{declines:,}" if declines else "—")
-    s4.metric("Unchanged",f"{unchanged:,}" if unchanged else "—")
-    t1,t2,t3,t4=st.columns(4)
-    t1.metric("52 Week High",f"{high52:,}" if high52 else "—")
-    t2.metric("52 Week Low",f"{low52:,}" if low52 else "—")
-    t3.metric("Upper Circuit",f"{upper_circuit:,}" if upper_circuit else "—")
-    t4.metric("Lower Circuit",f"{lower_circuit:,}" if lower_circuit else "—")
+        st.warning(official_stats.get("error", "NSE statistics unavailable.") + " No successful snapshot is available. Click Refresh to retry.")
+    if official_stats.get("source") == "NSE":
+        st.caption(f"Official NSE Market Statistics · As on {official_stats.get('as_on')} IST" + (" · LAST SUCCESSFUL SNAPSHOT" if stale else ""))
+    s1, s2, s3, s4 = st.columns(4)
+    for column, label, key in zip([s1, s2, s3, s4], ["Stock Traded", "Advances", "Declines", "Unchanged"], ["stock_traded", "advances", "declines", "unchanged"]):
+        column.metric(label, _nse_stat_display(official_stats.get(key)))
+    t1, t2, t3, t4 = st.columns(4)
+    for column, label, key in zip([t1, t2, t3, t4], ["52 Week High", "52 Week Low", "Upper Circuit", "Lower Circuit"], ["high52", "low52", "upper", "lower"]):
+        column.metric(label, _nse_stat_display(official_stats.get(key)))
 
     st.markdown("## 🟩 Heat Map")
     heat_mode=st.radio("Choose heat map",["Broad Market Indices","Sectoral Indices"],horizontal=True,key="heat_mode")
