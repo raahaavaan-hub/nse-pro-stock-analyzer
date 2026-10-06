@@ -1,6 +1,9 @@
 
 import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
 import json
+import time
+from contextlib import contextmanager
+import streamlit.components.v1 as components
 from datetime import date, datetime
 from datetime import timedelta
 from pathlib import Path
@@ -12,6 +15,28 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
 
 st.set_page_config(page_title="NSE Pro Market Terminal V14", page_icon="📈", layout="wide")
+
+
+@contextmanager
+def loading_stopwatch(message):
+    """Live browser timer during blocking work; final elapsed time uses server clock."""
+    started=time.perf_counter();slot=st.empty();completed=False
+    with slot.container():
+        components.html("""<div style="font:13px system-ui;color:#f8fafc;padding:4px 0">
+        ⏱ <span>"""+html.escape(str(message))+"""</span> · <b id="elapsed">00:00</b></div>
+        <script>const start=performance.now();
+        const tick=()=>{const seconds=Math.floor((performance.now()-start)/1000);
+        document.getElementById('elapsed').textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');};
+        tick();setInterval(tick,250);</script>""",height=32)
+    try:
+        yield
+        completed=True
+    finally:
+        elapsed=time.perf_counter()-started
+        slot.empty()
+        if completed:slot.caption(f'✓ {message} Finished in {elapsed:.1f} seconds.')
+        else:slot.caption(f'Loading stopped after {elapsed:.1f} seconds.')
+
 
 st.markdown("""
 <style>
@@ -1293,7 +1318,7 @@ def render_circuit_page():
         holidays=circuit_holidays()
         if selected.weekday()>=5 or selected in holidays:
             st.info('No regular trading session on this date. Select a trading day.');return
-        with st.spinner('Reading official closing, band and band-hitter reports…'):
+        with loading_stopwatch('Reading official closing, band and band-hitter reports…'):
             try: result=circuit_day_report(selected)
             except Exception:
                 st.warning('The dated NSE reports are unavailable or incomplete. Today’s final reports may not yet be published. Select the previous trading day or retry later.')
@@ -1586,7 +1611,7 @@ def render_us_market():
         companies=directory.set_index('Ticker').Company.to_dict()
         symbol=st.selectbox('Select a US stock',choices,format_func=lambda x:f'{x} — {companies.get(x,"")}',key='us_report_stock')
         if st.button('Get stock report',key='us_report_load'):
-            with st.spinner('Loading stock report…'):
+            with loading_stopwatch('Loading stock report…'):
                 try:
                     history,info,news=us_detail(symbol)
                     st.subheader(info.get('longName',companies.get(symbol,symbol)))
@@ -1668,32 +1693,58 @@ def nse_sector_figure(frame,period):
             texts.append(ret);custom.append([html.escape(str(r.Company)),ret,'—' if pd.isna(r.Latest) else f'₹{r.Latest:,.2f}',str(r.Date)])
     fig=go.Figure(go.Treemap(ids=ids,labels=labels,parents=parents,values=values,branchvalues='total',
              marker=dict(colors=colours,line=dict(width=1,color='#0b1523')),text=texts,texttemplate='%{label}<br>%{text}',
-             textfont=dict(color='white',size=13),customdata=custom,
+             textfont=dict(color='white',size=11),customdata=custom,
              hovertemplate='<b>%{label}</b><br>%{customdata[0]}<br>'+html.escape(period)+': %{customdata[1]}<br>%{customdata[2]}<br>Price date: %{customdata[3]}<extra></extra>',
              pathbar=dict(visible=True,textfont=dict(color='white'))))
-    fig.update_layout(height=700,margin=dict(t=10,l=0,r=0,b=0),paper_bgcolor='#0b1523',font_color='#f8fafc',uniformtext=dict(minsize=10,mode='hide'))
+    fig.update_layout(height=420,margin=dict(t=0,l=0,r=0,b=0),paper_bgcolor='#0b1523',font_color='#f8fafc',uniformtext=dict(minsize=10,mode='hide'))
     return fig
 
 
+def nse_sector_compact_html(frame):
+    panels=[]
+    for sector,part in frame.groupby('Sector',sort=True):
+        tiles=[]
+        for _,r in part.iterrows():
+            ret='N/A' if pd.isna(r.Return) else f'{r.Return:+.2f}%'
+            detail=f'{r.Company} | {ret} | Price date: {r.Date}'
+            tiles.append(f'<div class="sector-tile" title="{html.escape(detail,quote=True)}" style="background:{nse_sector_colour(r.Return)}"><b>{html.escape(str(r.Symbol))}</b><span>{ret}</span></div>')
+        panels.append(f'<section class="sector-panel"><h4>{html.escape(str(sector))} <small>({len(part)})</small></h4><div class="sector-tiles">'+''.join(tiles)+'</div></section>')
+    return """<style>
+    .sector-grid{columns:4;column-gap:7px}
+    .sector-panel{break-inside:avoid;background:#101c2c;border:1px solid #26364a;border-radius:6px;padding:5px;margin:0 0 7px}
+    .sector-panel h4{color:#e2e8f0;font:600 12px system-ui;margin:0 0 5px;line-height:1.25}
+    .sector-panel small{color:#94a3b8;font-size:10px}
+    .sector-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:3px}
+    .sector-tile{padding:4px 5px;border-radius:3px;color:white;min-width:0;line-height:1.25;font:11px system-ui}
+    .sector-tile b{display:block;overflow-wrap:anywhere}.sector-tile span{display:block;margin-top:2px}
+    @media(max-width:1000px){.sector-grid{columns:3}}
+    @media(max-width:700px){.sector-grid{columns:2}}
+    @media(max-width:400px){.sector-grid{columns:1}}
+    </style><div class="sector-grid">"""+''.join(panels)+'</div>'
+
+
 def render_nse_sector_view(group):
-    st.markdown('### 🧩 Sector-wise Stocks')
+    st.markdown('#### 🧩 Sector-wise Stocks')
     periods={'1 Day':1,'5 Days':5,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'5 Years':1260}
-    period=st.selectbox('Performance period',list(periods),key='nse_sector_period')
-    st.caption('Green = positive · Red = negative · Dark neutral = zero · Grey = insufficient / unavailable history. Equal-size stock tiles. Click a sector to zoom; use the path above the chart to return.')
-    try:
-        if group=='All NSE':symbols=list(dict.fromkeys(universe()))
-        else:symbols=nse_sector_constituents(group).Symbol.tolist()
-    except Exception:
-        st.error('The selected NSE constituent list is unavailable. Please retry later.');return
-    metadata={}
-    for catalog_group in ['Total Market','NIFTY 500',group if group!='All NSE' else 'Total Market']:
+    controls=st.columns([2,1])
+    period=controls[0].selectbox('Performance period',list(periods),key='nse_sector_period')
+    layout=controls[1].selectbox('Display',['Compact tiles','Treemap'],key='nse_sector_layout')
+    st.caption('Green = positive · Red = negative · Dark neutral = zero · Grey = insufficient / unavailable history. Compact tiles show symbol + change without empty space. Hover for details; Treemap supports sector zoom.')
+    with loading_stopwatch('Preparing stock list and sector labels…'):
         try:
-            for _,r in nse_sector_constituents(catalog_group).iterrows():metadata[str(r.Symbol)]={'sector':str(r.Industry),'company':str(r['Company Name'])}
-        except Exception:pass
+            if group=='All NSE':symbols=list(dict.fromkeys(universe()))
+            else:symbols=nse_sector_constituents(group).Symbol.tolist()
+        except Exception:
+            st.error('The selected NSE constituent list is unavailable. Please retry later.');return
+        metadata={}
+        for catalog_group in ['Total Market','NIFTY 500',group if group!='All NSE' else 'Total Market']:
+            try:
+                for _,r in nse_sector_constituents(catalog_group).iterrows():metadata[str(r.Symbol)]={'sector':str(r.Industry),'company':str(r['Company Name'])}
+            except Exception:pass
     st.caption(f'{len(symbols):,} requested stocks · NSE industry classifications are used as sector groups. Additional Yahoo sector labels are marked “Yahoo”.')
     col1,col2=st.columns(2)
     if col1.button('Build / Refresh Sector Heatmap',type='primary',use_container_width=True,key='nse_sector_build'):
-        with st.spinner(f'Loading saved prices / updating {len(symbols):,} stocks…'):
+        with loading_stopwatch(f'Loading saved prices / updating {len(symbols):,} stocks…'):
             bulk_snapshot(tuple(symbols),'5y',force_refresh=True)
         st.session_state['nse_sector_loaded']=tuple(symbols)
     extra=st.session_state.setdefault('nse_sector_extra',{})
@@ -1721,12 +1772,15 @@ def render_nse_sector_view(group):
     if not frame.Latest.notna().any():
         st.info('Click Build / Refresh Sector Heatmap to load prices.');return
     st.caption(f'{frame.Latest.notna().sum():,}/{len(frame):,} stocks have prices · {frame.Return.notna().sum():,} have enough history for {period} · {frame.Sector.eq("Unclassified").sum():,} unclassified. Price dates are shown on hover; cached stocks can have different dates.')
-    st.plotly_chart(nse_sector_figure(frame,period),use_container_width=True)
+    if layout=='Compact tiles':st.markdown(nse_sector_compact_html(frame),unsafe_allow_html=True)
+    else:st.plotly_chart(nse_sector_figure(frame,period),use_container_width=True)
     st.download_button('Export selected-period sector data',frame.to_csv(index=False),'nse_sector_performance.csv','text/csv')
 
 
 
 st.markdown("""<style>
+/* Keep previous content legible while a refresh runs. */
+[data-stale="true"]{opacity:1!important}
 /* Contrast fixes apply to controls across all modules. */
 [data-testid="stWidgetLabel"] p,[data-testid="stRadio"] label p,[data-testid="stCheckbox"] label p{color:#e2e8f0!important;opacity:1!important}
 [data-testid="stTabs"] [role="tab"]{color:#cbd5e1!important;opacity:1!important}
@@ -1970,7 +2024,7 @@ elif page=="📌 Watchlist":
     if current["stocks"]:
         st.markdown("##### Saved stocks and price movement")
         symbols=tuple(sorted({row["symbol"] for row in current["stocks"]}))
-        with st.spinner("Loading latest available market closes..."):
+        with loading_stopwatch("Loading latest available market closes..."):
             quotes=WL_quotes(symbols)
         st.dataframe(pd.DataFrame(WL_market_rows(current["stocks"],quotes)),hide_index=True,use_container_width=True)
         choices=[f"{j+1}. {row['stock']} · {row['symbol']} · {row['date']}" for j,row in enumerate(current["stocks"])]
@@ -2037,7 +2091,7 @@ elif page=="🔥 Market Heatmap":
             result.append((row["Symbol"],last,last-previous,change_pct))
         return result
 
-    with st.spinner(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
+    with loading_stopwatch(f"Loading {len(syms):,} {universe_name} stocks · {heat_period}..."):
         rows=stock_heat_prices(syms,heat_period,force_refresh=heat_force_refresh)
 
     if not rows:
@@ -2160,7 +2214,7 @@ elif page=="🧠 Pro Analyzer":
             except:return str(v)
         st.dataframe(x.map(fmt) if hasattr(x,"map") else x.applymap(fmt),use_container_width=True)
 
-    with st.spinner(f"Loading complete research for {symbol}..."):
+    with loading_stopwatch(f"Loading complete research for {symbol}..."):
         info,hist,qpl,apl,qbs,abs_,qcf,acf,major,inst=PA_bundle(ticker)
 
     last=PA_num(PA_val(info,"currentPrice","regularMarketPrice"))
@@ -2357,7 +2411,7 @@ elif page=="🚀 Swing Screeners":
 
     if st.button("🏆 Build Top Swing Picks Today", type="primary", key="top_picks"):
         syms=universe()[:500]
-        with st.spinner("Scanning 500 liquid-listed symbols for technical setups..."):
+        with loading_stopwatch("Scanning 500 liquid-listed symbols for technical setups..."):
             snap=bulk_snapshot(tuple(syms),"1y")
         if snap is not None and not snap.empty:
             z=snap.copy()
@@ -2396,7 +2450,7 @@ elif page=="🚀 Swing Screeners":
     name=st.selectbox("Preset",list(SCREENERS));st.info(SCREENERS[name]);size=st.selectbox("Universe size",[100,250,500,1000,"All"],index=1)
     if st.button("🔥 Run Screener",type="primary"):
         syms=universe();syms=syms if size=="All" else syms[:int(size)]
-        with st.spinner("Downloading market history in batches..."):snap=bulk_snapshot(tuple(syms),"1y");res=run_screen(snap,name)
+        with loading_stopwatch("Downloading market history in batches..."):snap=bulk_snapshot(tuple(syms),"1y");res=run_screen(snap,name)
         res=clean_display(res)
         st.dataframe(res,use_container_width=True,height=600,hide_index=True)
         if not res.empty:
@@ -2489,7 +2543,7 @@ elif page=="📰 Stock News":
         base+f'("stocks to watch" OR "stock in focus" OR "market moving") {when}',
     ]
     all_items=[]
-    with st.spinner("Loading fresh market catalysts..."):
+    with loading_stopwatch("Loading fresh market catalysts..."):
         for qq in queries:all_items.extend(NEWS_rss(qq,100))
 
     # Merge, hard-filter dates locally, dedupe, newest first.
@@ -2530,7 +2584,7 @@ elif page=="🎯 Brokerage Calls":
     if st.button("⚡ Refresh Brokerage Calls",type="primary"):
         syms=universe()
         allrows=[]
-        with st.spinner("Searching brokerage calls and comparing market prices..."):
+        with loading_stopwatch("Searching brokerage calls and comparing market prices..."):
             for b in chosen:
                 allrows.extend(broker_calls_from_news(b,syms,limit))
         st.session_state["broker_rows"]=allrows
@@ -2657,7 +2711,7 @@ elif page=="🌐 All NSE Performance":
         order=c3.selectbox("Order",order_options,key="classic_order")
 
         if st.button("📊 Build / Refresh Classic Table",type="primary",use_container_width=True,key="classic_build"):
-            with st.spinner(f"Loading {len(use_syms):,} stocks..."):
+            with loading_stopwatch(f"Loading {len(use_syms):,} stocks..."):
                 st.session_state["classic_df"]=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
 
         classic=st.session_state.get("classic_df")
@@ -2671,7 +2725,7 @@ elif page=="🌐 All NSE Performance":
 
             show_brokerage=st.checkbox("🔵 Check recent public brokerage calls",value=True,key="classic_brokerage")
             if show_brokerage:
-                with st.spinner("Checking recent brokerage-call headlines..."):
+                with loading_stopwatch("Checking recent brokerage-call headlines..."):
                     broker_map=brokerage_tags_for_symbols(tuple(d["Symbol"].astype(str).tolist()))
                 d["Brokerage Call"]=d["Symbol"].astype(str).map(broker_map).fillna("")
             else:
@@ -2734,7 +2788,7 @@ elif page=="🌐 All NSE Performance":
         trend_filter=g3.selectbox("Trend filter",["All","Price > SMA20","Price > SMA50","SMA20 > SMA50","SMA50 > SMA200","Price > SMA20 > SMA50"],key="smart_trend")
 
         if st.button("⚡ Scan NSE Market",type="primary",use_container_width=True,key="smart_scan"):
-            with st.spinner("Scanning selected universe..."):
+            with loading_stopwatch("Scanning selected universe..."):
                 d=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
 
             if isinstance(d,pd.DataFrame) and not d.empty:
@@ -2800,7 +2854,7 @@ elif page=="🏦 Institutional Watch":
         st.caption("This is a technical proxy only — not FII/DII ownership evidence.")
         if st.button("Run High Volume Breakout Proxy",key="inst_proxy"):
             syms=universe()[:500]
-            with st.spinner("Scanning price + volume participation..."):
+            with loading_stopwatch("Scanning price + volume participation..."):
                 snap=bulk_snapshot(tuple(syms),"1y")
                 res=run_screen(snap,"High Volume Breakout")
             st.dataframe(clean_display(res),use_container_width=True,height=560,hide_index=True)
