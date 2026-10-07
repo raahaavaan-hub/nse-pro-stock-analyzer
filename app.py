@@ -1803,6 +1803,24 @@ def nse_percentage_filter(frame,direction,threshold):
     mask=column.ge(float(threshold)) if direction=='Gainer' else column.le(-float(threshold))
     return frame.loc[mask].sort_values('Change %',ascending=direction=='Loser').reset_index(drop=True)
 
+def nse_percentage_style(frame):
+    palette=['#dbeafe','#ede9fe','#fef3c7','#cffafe','#fce7f3','#e0e7ff']
+    sector_colours={sector:palette[i%len(palette)] for i,sector in enumerate(sorted(frame['Sector / Business'].unique()))}
+    def colour_row(row):
+        base='#f8fafc' if row.name%2 else '#ffffff'
+        styles=['background-color:'+base+';color:#172033' for _ in row]
+        for i,column in enumerate(frame.columns):
+            if column=='Symbol':styles[i]='background-color:#dbeafe;color:#1e40af;font-weight:bold'
+            elif column=='Stock Name':styles[i]='background-color:#eff6ff;color:#172033'
+            elif column=='Change %':
+                gain=row[column]>=0
+                styles[i]='background-color:'+('#dcfce7' if gain else '#fee2e2')+';color:'+('#166534' if gain else '#b91c1c')+';font-weight:bold'
+            elif column=='Sector / Business':styles[i]='background-color:'+sector_colours[row[column]]+';color:#312e81'
+            elif column=='No.':styles[i]='background-color:#e0e7ff;color:#3730a3;font-weight:bold'
+        return styles
+    return frame.style.apply(colour_row,axis=1).format({'Change %':'{:+.2f}%'})
+
+
 def render_nse_percentage_view(group,default_symbols):
     st.markdown('#### 📊 By Percentage')
     controls=st.columns([2,1,1])
@@ -1844,7 +1862,8 @@ def render_nse_percentage_view(group,default_symbols):
     if available==0:st.info('Click Load / Update percentage data. Changing the threshold or Gainer/Loser uses saved prices without downloading again.');return
     if result.empty:st.info(f'No stocks match {direction.lower()} ≥ {threshold:g}% for {period} in the available data.');return
     result.insert(0,'No.',range(1,len(result)+1))
-    st.dataframe(result.style.format({'Change %':'{:+.2f}%'}),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35))
+    st.caption('🟢 Gains · 🔴 Falls · Coloured sector cells identify groups')
+    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35))
     st.download_button('Download matching stocks',result.to_csv(index=False),'nse_percentage_matches.csv','text/csv',key='nse_pct_csv')
 
 
