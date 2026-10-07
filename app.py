@@ -1228,27 +1228,57 @@ def circuit_join_reports(bhav,bands,hitters,day):
     columns=['Date','Symbol','Series','Company','Band %','Type','Direction','Close (₹)','Change %','Status','Volume']
     return pd.DataFrame(records,columns=columns)
 
-@st.cache_data(ttl=900,show_spinner=False)
-def circuit_day_report(day):
+def circuit_parse_reports(day, bodies):
     import zipfile
     stamp=day.strftime('%d%m%Y')
-    base='https://nsearchives.nseindia.com/'
+    bhav=circuit_csv(bodies[0]); bands=circuit_csv(bodies[1])
+    if 'DATE1' not in bhav.columns:
+        raise ValueError('Closing CSV is missing DATE1; use Full Bhavcopy and Security Deliverable data.')
+    dates=pd.to_datetime(bhav['DATE1'],format='%d-%b-%Y',errors='coerce').dt.date
+    if dates.dropna().empty or not dates.dropna().eq(day).all():
+        raise ValueError('Closing report date does not match the selected date.')
+    with zipfile.ZipFile(io.BytesIO(bodies[2])) as archive:
+        accepted={f'bh{stamp}.csv',f'bh{day.strftime("%d%m%y")}.csv'}
+        filename=next((n for n in archive.namelist() if n.replace('\\','/').split('/')[-1].lower() in accepted),None)
+        if filename is None:
+            raise ValueError('PR archive has no dated band-hitter CSV (bh'+stamp+'.csv).')
+        hitters=circuit_csv(archive.read(filename))
+    return {'rows':circuit_join_reports(bhav,bands,hitters,day),'coverage':len(bhav),'date':day.isoformat()}
+
+
+@st.cache_data(ttl=900,show_spinner=False)
+def circuit_day_report(day):
+    stamp=day.strftime('%d%m%Y')
     paths=[f'products/content/sec_bhavdata_full_{stamp}.csv',
            f'content/equities/sec_list_{stamp}.csv',
            f'archives/equities/bhavcopy/pr/PR{day.strftime("%d%m%y")}.zip']
+    labels=['Closing report','Price-band list','PR band-hitter archive']
     bodies=[]
     with requests.Session() as session:
-        session.headers.update(HEADERS)
-        for path in paths:
-            r=session.get(base+path,timeout=(5,20)); r.raise_for_status(); bodies.append(r.content)
-    bhav=circuit_csv(bodies[0]); bands=circuit_csv(bodies[1])
-    # Never use reports from another date, even if a provider redirects.
-    dates=pd.to_datetime(bhav['DATE1'],format='%d-%b-%Y',errors='coerce').dt.date
-    if dates.dropna().empty or not dates.dropna().eq(day).all(): raise ValueError('Report date mismatch')
-    with zipfile.ZipFile(io.BytesIO(bodies[2])) as archive:
-        filename=next(n for n in archive.namelist() if n.lower()==f'bh{stamp}.csv')
-        hitters=circuit_csv(archive.read(filename))
-    return {'rows':circuit_join_reports(bhav,bands,hitters,day),'coverage':len(bhav),'date':day.isoformat()}
+        session.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+            'Accept':'*/*','Accept-Language':'en-US,en;q=0.9','Referer':'https://www.nseindia.com/all-reports'})
+        warmed=False
+        for path,label in zip(paths,labels):
+            errors=[];body=None
+            for attempt in range(2):
+                if attempt and not warmed:
+                    try: session.get('https://www.nseindia.com/all-reports',timeout=(5,8))
+                    except requests.RequestException: pass
+                    warmed=True
+                try:
+                    response=session.get('https://nsearchives.nseindia.com/'+path,timeout=(5,20))
+                    response.raise_for_status()
+                    content=response.content
+                    if not content or content.lstrip().lower().startswith((b'<!doctype html',b'<html')):
+                        raise ValueError('NSE returned an empty page or HTML instead of a report')
+                    body=content;break
+                except (requests.RequestException,ValueError) as exc:
+                    errors.append(str(exc))
+            if body is None:
+                raise RuntimeError(f'{label} for {day:%d %b %Y} failed: {errors[-1]}')
+            bodies.append(body)
+    return circuit_parse_reports(day,bodies)
+
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def circuit_holidays():
@@ -1374,6 +1404,24 @@ def render_circuit_page():
     if selected==today:render_circuit_live(today)
     lookback=st.selectbox('Maximum streak verification',['1 trading day','2 trading days','5 trading days','10 trading days','20 trading days','60 trading days'],index=4,key='circuit_lookback')
     limit=int(lookback.split()[0])
+    if st.session_state.get('circuit_load_failed')==selected:
+        st.link_button('Open NSE official reports','https://www.nseindia.com/all-reports')
+        with st.expander('Load downloaded NSE reports if automatic download is blocked',expanded=True):
+            st.caption('Download these three reports for the selected date from NSE. They are used only for Circuit & Volatility.')
+            closing=st.file_uploader('Full Bhavcopy and Security Deliverable data (CSV)',type=['csv'],key='circuit_upload_close')
+            band_file=st.file_uploader('CM - Price Band complete list (CSV)',type=['csv'],key='circuit_upload_band')
+            press=st.file_uploader('Bhavcopy (PR) (ZIP)',type=['zip'],key='circuit_upload_pr')
+            if st.button('Read uploaded reports',key='circuit_read_upload'):
+                if closing is None or band_file is None or press is None:
+                    st.warning('Choose all three files for the selected date.')
+                else:
+                    try:
+                        report=circuit_parse_reports(selected,[closing.getvalue(),band_file.getvalue(),press.getvalue()])
+                        fixed=report['rows'];fixed=fixed[(fixed.Type=='Fixed')&(fixed.Status=='Closed at circuit')]
+                        fixed=circuit_streaks(fixed,[],True)
+                        st.session_state['circuit_result']={'date':selected,'report':report,'fixed':fixed,'limit':1,'loaded':datetime.now(ZoneInfo('Asia/Kolkata')).strftime('%d %b %Y %H:%M IST')}
+                        st.success('Uploaded reports loaded. Historical streaks have not been verified.')
+                    except Exception as exc: st.error('Could not read uploaded reports: '+str(exc))
     if st.button('Load / refresh circuits and streaks',type='primary',key='circuit_scan'):
         circuit_day_report.clear()
         holidays=circuit_holidays()
@@ -1381,9 +1429,14 @@ def render_circuit_page():
             st.info('No regular trading session on this date. Select a trading day.');return
         with loading_stopwatch('Reading official closing, band and band-hitter reports…'):
             try: result=circuit_day_report(selected)
-            except Exception:
-                st.warning('The dated NSE reports are unavailable or incomplete. Today’s final reports may not yet be published. Select the previous trading day or retry later.')
-                st.link_button('Open NSE official reports','https://www.nseindia.com/all-reports');return
+            except Exception as exc:
+                result=None
+                st.warning(f'NSE reports could not be loaded for {selected:%d %b %Y}. No circuit counts were calculated.')
+                st.error(str(exc))
+                st.session_state['circuit_load_failed']=selected
+        if result is None:
+            return
+        st.session_state.pop('circuit_load_failed',None)
         fixed=result['rows'];fixed=fixed[(fixed.Type=='Fixed')&(fixed.Status=='Closed at circuit')]
         history=[];cursor=selected;status=st.empty()
         # Stop once all current candidates have a verified end to their streak.
