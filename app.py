@@ -2,6 +2,8 @@
 import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
 import json
 import time
+import logging
+import threading
 from contextlib import contextmanager
 import streamlit.components.v1 as components
 from datetime import date, datetime
@@ -235,30 +237,49 @@ def market_cache_frame(download,symbol,ticker,batch_size):
         pass
     return pd.DataFrame()
 
+@st.cache_resource(show_spinner=False)
+def price_request_state():
+    return {'lock':threading.Lock(),'until':0.0,'last':0.0,'classic':{}}
+
+class PriceRateLimited(Exception):pass
+
+class PriceLimitLog(logging.Handler):
+    def __init__(self):super().__init__();self.limited=False
+    def emit(self,record):
+        message=record.getMessage().lower()
+        if '429' in message or 'rate limit' in message or 'too many requests' in message:self.limited=True
+
+def limited_price_download(tickers,**options):
+    state=price_request_state()
+    with state['lock']:
+        if time.monotonic()<state['until']:raise PriceRateLimited('Price requests paused for five minutes after rate limiting.')
+        delay=1.0-(time.monotonic()-state['last'])
+        if delay>0:time.sleep(delay)
+        handler=PriceLimitLog();logger=logging.getLogger('yfinance');logger.addHandler(handler)
+        try:
+            result=yf.download(tickers,threads=4,timeout=15,**options)
+        except Exception as error:
+            if any(text in str(error).lower() for text in ['429','rate limit','too many requests']):handler.limited=True
+            if handler.limited:state['until']=time.monotonic()+300
+            raise
+        finally:
+            logger.removeHandler(handler);state['last']=time.monotonic()
+        if handler.limited:state['until']=time.monotonic()+300
+        return result,handler.limited
+
 def market_cache_fetch(symbols,start=None):
-    """Initial backfill is 5y; subsequent refresh starts near the last saved day."""
     result={}
     for offset in range(0,len(symbols),70):
-        batch=symbols[offset:offset+70]
-        tickers=[symbol+".NS" for symbol in batch]
-        opts={"start":start} if start else {"period":"5y"}
+        batch=symbols[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
+        opts={'start':start} if start else {'period':'5y'}
         try:
-            downloaded=yf.download(tickers,interval="1d",group_by="ticker",
-                                   auto_adjust=False,progress=False,threads=True,**opts)
+            downloaded,limited=limited_price_download(tickers,interval='1d',group_by='ticker',auto_adjust=False,progress=False,**opts)
         except Exception:
-            downloaded=None
+            break
         for symbol,ticker in zip(batch,tickers):
             frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
-            if frame.empty:
-                try:
-                    frame=yf.download(ticker,interval="1d",auto_adjust=False,
-                                      progress=False,threads=False,**opts)
-                    if isinstance(frame.columns,pd.MultiIndex):
-                        frame.columns=frame.columns.get_level_values(0)
-                except Exception:
-                    frame=pd.DataFrame()
-            if not frame.empty and "Close" in frame:
-                result[symbol]=frame
+            if not frame.empty and 'Close' in frame:result[symbol]=frame
+        if limited or not result:break
     return result
 
 def market_cache_merge(previous,frame,checked):
@@ -351,34 +372,43 @@ def shared_market_snapshot(symbols,force_refresh=False):
             if metrics:rows.append(metrics)
     return pd.DataFrame(rows)
 
-@st.cache_data(ttl=900,show_spinner=False)
 def classic_period_snapshot(symbols_tuple,period):
-    """Classic table downloads only its selected history, independently of sector cache."""
-    symbols=list(dict.fromkeys(symbols_tuple));rows=[];failed=[]
+    """Reuse saved per-period records and stop requests on rate limiting."""
+    symbols=list(dict.fromkeys(symbols_tuple));state=price_request_state()
+    saved=state['classic'].setdefault(period,{})
+    now=time.monotonic();todo=[symbol for symbol in symbols if symbol not in saved or now-saved[symbol]['saved_at']>=900]
     checked=datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
-    progress=st.progress(0);status=st.empty()
+    progress=st.progress(0);status=st.empty();notice='';empty_batches=0
     try:
-        for offset in range(0,len(symbols),70):
-            batch=symbols[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
+        for offset in range(0,len(todo),70):
+            batch=todo[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
             try:
-                downloaded=yf.download(tickers,period=period,interval='1d',group_by='ticker',
-                    auto_adjust=False,progress=False,threads=True,timeout=20)
-            except Exception:downloaded=None
+                downloaded,limited=limited_price_download(tickers,period=period,interval='1d',group_by='ticker',auto_adjust=False,progress=False)
+            except Exception as error:
+                notice='Price downloads stopped. Showing saved data where available. '+str(error);break
+            available=0
             for symbol,ticker in zip(batch,tickers):
                 frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
-                # Failed tickers remain unavailable; no long series of individual retries.
                 record=market_cache_merge(None,frame,checked) if not frame.empty else None
                 if record:
-                    row=market_cache_metrics(symbol,record)
-                    if row:
-                        if period!='5y':row['5Y %']=np.nan
-                        rows.append(row)
-                else:failed.append(symbol)
-            done=min(offset+len(batch),len(symbols))
-            progress.progress(done/max(len(symbols),1))
-            status.caption(f'Prices processed: {done:,}/{len(symbols):,} · available: {len(rows):,} · unavailable: {len(failed):,}')
-    finally:
-        progress.empty();status.empty()
+                    saved[symbol]={'record':record,'saved_at':time.monotonic()};available+=1
+            done=min(offset+len(batch),len(todo));progress.progress(done/max(len(todo),1))
+            status.caption(f'Prices checked: {done:,}/{len(todo):,} · saved results retained')
+            empty_batches=empty_batches+1 if available==0 else 0
+            if limited:
+                notice='Price service rate-limited requests. Downloads paused for five minutes; saved prices are shown.';break
+            if empty_batches>=2:
+                notice='Two batches returned no prices. Downloads stopped; saved prices are shown.';break
+    finally:progress.empty();status.empty()
+    rows=[];failed=[]
+    for symbol in symbols:
+        entry=saved.get(symbol)
+        if not entry:failed.append(symbol);continue
+        row=market_cache_metrics(symbol,entry['record'])
+        if row:
+            if period!='5y':row['5Y %']=np.nan
+            row['Price Date']=entry['record']['last_date'];rows.append(row)
+    st.session_state['classic_load_notice']=notice
     return pd.DataFrame(rows),failed
 
 
@@ -1754,6 +1784,70 @@ def nse_sector_compact_html(frame):
     </style><div class="sector-grid">"""+''.join(panels)+'</div>'
 
 
+NSE_PERCENT_PERIODS={'1 Day':1,'1 Week':5,'2 Weeks':10,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'2 Years':504,'5 Years':1260}
+
+def nse_percentage_return(record,period):
+    closes=(record or {}).get('closes',[]);sessions=NSE_PERCENT_PERIODS[period]
+    if len(closes)>sessions:return nse_sector_return(record,sessions)
+    # Calendar windows can contain fewer sessions; accept only a full year span.
+    if period not in ['1 Year','2 Years','5 Years'] or not closes:return np.nan
+    years={'1 Year':1,'2 Years':2,'5 Years':5}[period]
+    boundary=pd.Timestamp(closes[-1][0])-pd.DateOffset(years=years)
+    if pd.Timestamp(closes[0][0])>boundary+pd.Timedelta(days=7):return np.nan
+    baseline=float(closes[0][1]);last=float(closes[-1][1])
+    return (last/baseline-1)*100 if baseline>0 and np.isfinite(last) else np.nan
+
+def nse_percentage_filter(frame,direction,threshold):
+    if frame.empty:return frame.copy()
+    column=pd.to_numeric(frame['Change %'],errors='coerce')
+    mask=column.ge(float(threshold)) if direction=='Gainer' else column.le(-float(threshold))
+    return frame.loc[mask].sort_values('Change %',ascending=direction=='Loser').reset_index(drop=True)
+
+def render_nse_percentage_view(group,default_symbols):
+    st.markdown('#### 📊 By Percentage')
+    controls=st.columns([2,1,1])
+    period=controls[0].selectbox('Trading period',list(NSE_PERCENT_PERIODS),key='nse_pct_period')
+    direction=controls[1].selectbox('Show',['Gainer','Loser'],key='nse_pct_direction')
+    threshold=controls[2].number_input('Minimum move %',min_value=0.0,value=50.0,step=5.0,key='nse_pct_threshold')
+    history='5y' if period=='5 Years' else '2y' if period in ['1 Year','2 Years'] else '1y'
+    st.caption('Gainer 50: +50% or higher · Loser 50: −50% or lower. No upper cap. Weeks/months use 5/10/21/63/126 trading sessions. Year windows use 252/504/1260 sessions, or a complete calendar-year span.')
+    state=st.session_state.setdefault('nse_percentage_data',{})
+    if st.button('Load / Update percentage data',type='primary',key='nse_pct_build',use_container_width=True):
+        with loading_stopwatch('Loading selected-period prices and sector labels…'):
+            try:
+                symbols=list(dict.fromkeys(default_symbols)) if group=='All NSE' else nse_sector_constituents(group).Symbol.tolist()
+            except Exception as error:
+                st.error('Could not load the selected index constituents: '+str(error));return
+            metadata={}
+            for catalog in dict.fromkeys(['Total Market','NIFTY 500',group if group!='All NSE' else 'Total Market']):
+                try:
+                    for _,r in nse_sector_constituents(catalog).iterrows():metadata[str(r.Symbol)]={'company':str(r['Company Name']),'sector':str(r.Industry)}
+                except Exception:pass
+            classic_period_snapshot(tuple(symbols),history)
+            state.update(group=group,symbols=symbols,metadata=metadata)
+    symbols=state.get('symbols',list(default_symbols)) if state.get('group')==group else list(default_symbols)
+    metadata=state.get('metadata',{}) if state.get('group')==group else {}
+    shared=st.session_state.get('shared_nse_price_cache',{}).get('records',{})
+    saved=price_request_state()['classic'];rows=[]
+    for symbol in symbols:
+        candidates=[shared.get(symbol)]+[bucket.get(symbol,{}).get('record') for bucket in saved.values()]
+        candidates=[r for r in candidates if r and r.get('closes')]
+        record=max(candidates,key=lambda r:(r['last_date'],len(r['closes']))) if candidates else None
+        value=nse_percentage_return(record,period)
+        data=metadata.get(symbol,{})
+        rows.append({'Symbol':symbol,'Stock Name':data.get('company',symbol),'Change %':value,'Sector / Business':data.get('sector','Unclassified'),'Price Date':(record or {}).get('last_date','Unavailable')})
+    frame=pd.DataFrame(rows)
+    if frame.empty:st.info('No stocks available for this universe.');return
+    available=int(frame['Change %'].notna().sum());result=nse_percentage_filter(frame,direction,threshold)
+    st.caption(f'{available:,}/{len(symbols):,} stocks have sufficient saved history · {len(result):,} match · dates shown per stock. Unavailable history is excluded. Sector labels use NSE industry classifications.')
+    if st.session_state.get('classic_load_notice'):st.warning(st.session_state['classic_load_notice'])
+    if available==0:st.info('Click Load / Update percentage data. Changing the threshold or Gainer/Loser uses saved prices without downloading again.');return
+    if result.empty:st.info(f'No stocks match {direction.lower()} ≥ {threshold:g}% for {period} in the available data.');return
+    result.insert(0,'No.',range(1,len(result)+1))
+    st.dataframe(result.style.format({'Change %':'{:+.2f}%'}),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35))
+    st.download_button('Download matching stocks',result.to_csv(index=False),'nse_percentage_matches.csv','text/csv',key='nse_pct_csv')
+
+
 def render_nse_sector_view(group):
     st.markdown('#### 🧩 Sector-wise Stocks')
     periods={'1 Day':1,'5 Days':5,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'5 Years':1260}
@@ -2714,7 +2808,7 @@ elif page=="🌐 All NSE Performance":
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
     st.markdown("## 📋 Stock Performance")
-    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner","🧩 Sector-wise Stocks"],horizontal=True,key="allnse_view")
+    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner","🧩 Sector-wise Stocks","📊 By Percentage"],horizontal=True,key="allnse_view")
 
     universe_group=st.selectbox(
         "Universe",
@@ -2731,7 +2825,9 @@ elif page=="🌐 All NSE Performance":
     elif universe_group=="NIFTY Smallcap": use_syms=syms[250:500]
     else: use_syms=syms
 
-    if view=="🧩 Sector-wise Stocks":
+    if view=="📊 By Percentage":
+        render_nse_percentage_view(universe_group,use_syms)
+    elif view=="🧩 Sector-wise Stocks":
         render_nse_sector_view(universe_group)
     elif view=="📋 Classic Table (Excel Style)":
         st.markdown("### 📋 Classic Performance Table")
@@ -2752,9 +2848,10 @@ elif page=="🌐 All NSE Performance":
             st.info('Click Build / Refresh to load the selected universe and history.')
             classic=None
         else:classic=st.session_state.get("classic_df")
-        st.caption('Selected history only · results reused for 15 minutes. Sector history is loaded separately.')
+        st.caption('Selected history only · saved results reused for 15 minutes · four simultaneous downloads maximum. Sector history is separate.')
+        if st.session_state.get('classic_load_notice'):st.warning(st.session_state['classic_load_notice'])
         if classic is not None and st.session_state.get('classic_failed'):
-            st.warning(f"{len(st.session_state['classic_failed']):,} stocks returned no prices and are excluded; no individual retry loop.")
+            st.warning(f"{len(st.session_state['classic_failed']):,} stocks have no saved prices yet; shown results may be incomplete.")
         if isinstance(classic,pd.DataFrame) and not classic.empty:
             d=classic.copy()
             if sort_by=="Symbol":
