@@ -1874,6 +1874,84 @@ def nse_percentage_style(frame):
     return frame.style.apply(colour_row,axis=1).format({'Change %':'{:+.2f}%'})
 
 
+def nse_steady_pattern(record,sessions,max_pullback=15.0):
+    """Screen daily closing-price swings; confirmed pivots exclude endpoints."""
+    import math
+    history=(record or {}).get('closes',[])
+    by_date={str(item[0]):float(item[1]) for item in history}
+    points=sorted(by_date.items())
+    if len(points)<sessions+1:return None
+    points=points[-(sessions+1):];values=[v for _,v in points]
+    if any(not math.isfinite(v) or v<=0 for v in values):return None
+    gain=(values[-1]/values[0]-1)*100
+    logs=[math.log(v) for v in values];n=len(logs);xm=(n-1)/2;ym=sum(logs)/n
+    xx=sum((i-xm)**2 for i in range(n));yy=sum((v-ym)**2 for v in logs)
+    xy=sum((i-xm)*(v-ym) for i,v in enumerate(logs));slope=xy/xx
+    r2=xy*xy/(xx*yy) if yy else 0
+    highs=[values[i] for i in range(1,n-1) if values[i]>values[i-1] and values[i]>=values[i+1]]
+    lows=[values[i] for i in range(1,n-1) if values[i]<values[i-1] and values[i]<=values[i+1]]
+    if len(highs)<2 or len(lows)<2:return None
+    hh=highs[-1]>highs[-2];hl=lows[-1]>lows[-2]
+    peak=values[0];drawdown=0
+    for v in values:
+        peak=max(peak,v);drawdown=max(drawdown,(1-v/peak)*100)
+    latest_pullback=(1-values[-1]/max(values))*100
+    ma_now=sum(values[-10:])/10;ma_before=sum(values[-15:-5])/10
+    if not (gain>0 and slope>0 and r2>=0.55 and hh and hl and drawdown<=max_pullback and values[-1]>=ma_now and ma_now>ma_before):return None
+    return {'Gain %':gain,'Latest pullback %':latest_pullback,'Largest pullback %':drawdown,
+        'Trend consistency':round(r2*100,1),'Price Date':points[-1][0],'Price chart':values}
+
+
+def render_nse_steady_view(group,default_symbols):
+    st.markdown('#### 📈 Steady Uptrend')
+    controls=st.columns(2)
+    period=controls[0].selectbox('Pattern period',['1 Month','3 Months','6 Months'],key='steady_period')
+    maximum=controls[1].number_input('Maximum pullback %',min_value=1.0,max_value=50.0,value=15.0,step=1.0,key='steady_pullback')
+    st.caption('Daily closing prices: positive trend, last two confirmed swing highs and lows rising, trend consistency ≥55%, rising 10-day average and pullbacks within your limit. This is a pattern screen, not a prediction. Splits / corporate actions can affect unadjusted prices.')
+    state=st.session_state.setdefault('nse_steady_data',{})
+    if st.button('Load / Update uptrend data',type='primary',key='steady_load'):
+        with loading_stopwatch('Loading prices and sector labels for uptrend patterns…'):
+            try:
+                catalog=nse_sector_constituents('Total Market' if group=='All NSE' else group)
+                symbols=list(default_symbols) if group=='All NSE' else catalog.Symbol.tolist()
+                metadata={str(r.Symbol):{'company':str(r['Company Name']),'sector':str(r.Industry)} for _,r in catalog.iterrows()}
+                classic_period_snapshot(tuple(symbols),'1y')
+                state.update(group=group,symbols=symbols,metadata=metadata)
+            except Exception as exc:st.error('Could not load uptrend data: '+str(exc));return
+    prior=st.session_state.get('nse_percentage_data',{})
+    active=state if state.get('group')==group else prior if prior.get('group')==group else {}
+    symbols=active.get('symbols',list(default_symbols));metadata=active.get('metadata',{})
+    shared=st.session_state.get('shared_nse_price_cache',{}).get('records',{})
+    saved=price_request_state()['classic'];rows=[];available=0
+    sessions=NSE_PERCENT_PERIODS[period]
+    for symbol in symbols:
+        candidates=[shared.get(symbol)]+[bucket.get(symbol,{}).get('record') for bucket in saved.values()]
+        candidates=[r for r in candidates if r and len(r.get('closes',[]))>=sessions+1]
+        if not candidates:continue
+        record=max(candidates,key=lambda r:(r.get('last_date',''),len(r['closes'])))
+        available+=1
+        try:pattern=nse_steady_pattern(record,sessions,maximum)
+        except (ValueError,TypeError,IndexError):continue
+        if pattern:
+            info=metadata.get(symbol,{})
+            rows.append({'Symbol':symbol,'Stock Name':info.get('company',symbol),'Sector':info.get('sector','Unclassified'),**pattern})
+    st.caption(f'{available:,}/{len(symbols):,} stocks have enough saved history · {len(rows):,} match. Changing period or pullback limit reuses saved prices.')
+    if st.session_state.get('classic_load_notice'):st.warning(st.session_state['classic_load_notice'])
+    if not rows:
+        st.info('No matching patterns in available history. Load prices if coverage is incomplete, or change the period / pullback limit.');return
+    frame=pd.DataFrame(rows).sort_values(['Trend consistency','Gain %'],ascending=False)
+    sectors=sorted(frame.Sector.unique())
+    selected=st.multiselect('Sectors',sectors,default=sectors,key='steady_sectors_'+group)
+    frame=frame[frame.Sector.isin(selected)].reset_index(drop=True)
+    st.dataframe(frame,hide_index=True,use_container_width=True,height=min(650,38+len(frame)*35),column_config={
+        'Price chart':st.column_config.LineChartColumn('Price chart',width='medium'),
+        'Gain %':st.column_config.NumberColumn(format='%.2f%%'),
+        'Latest pullback %':st.column_config.NumberColumn(format='%.2f%%'),
+        'Largest pullback %':st.column_config.NumberColumn(format='%.2f%%'),
+        'Trend consistency':st.column_config.NumberColumn('Trend consistency /100',format='%.1f')})
+    st.download_button('Download uptrend matches',frame.drop(columns=['Price chart']).to_csv(index=False),'steady_uptrend.csv','text/csv',key='steady_csv')
+
+
 def render_nse_percentage_view(group,default_symbols):
     st.markdown('#### 📊 By Percentage')
     controls=st.columns([2,1,1])
@@ -2880,7 +2958,7 @@ elif page=="🌐 All NSE Performance":
         st.markdown("<div class='nse-heat-grid'>"+"".join(cards)+"</div>",unsafe_allow_html=True)
 
     st.markdown("## 📋 Stock Performance")
-    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner","🧩 Sector-wise Stocks","📊 By Percentage"],horizontal=True,key="allnse_view")
+    view=st.radio("Choose view",["📋 Classic Table (Excel Style)","⚡ Smart Scanner","🧩 Sector-wise Stocks","📊 By Percentage","📈 Steady Uptrend"],horizontal=True,key="allnse_view")
 
     universe_group=st.selectbox(
         "Universe",
@@ -2897,7 +2975,9 @@ elif page=="🌐 All NSE Performance":
     elif universe_group=="NIFTY Smallcap": use_syms=syms[250:500]
     else: use_syms=syms
 
-    if view=="📊 By Percentage":
+    if view=="📈 Steady Uptrend":
+        render_nse_steady_view(universe_group,use_syms)
+    elif view=="📊 By Percentage":
         render_nse_percentage_view(universe_group,use_syms)
     elif view=="🧩 Sector-wise Stocks":
         render_nse_sector_view(universe_group)
