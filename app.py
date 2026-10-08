@@ -1874,6 +1874,8 @@ def nse_percentage_style(frame):
     return frame.style.apply(colour_row,axis=1).format({'Change %':'{:+.2f}%'})
 
 
+STEADY_PERIODS={'1 Week':5,'2 Weeks':10,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'2 Years':504,'5 Years':1260,'10 Years':2520,'15 Years':3780,'25 Years':6300}
+
 def nse_steady_pattern(record,sessions,max_pullback=15.0):
     """Screen daily closing-price swings; confirmed pivots exclude endpoints."""
     import math
@@ -1896,18 +1898,57 @@ def nse_steady_pattern(record,sessions,max_pullback=15.0):
     for v in values:
         peak=max(peak,v);drawdown=max(drawdown,(1-v/peak)*100)
     latest_pullback=(1-values[-1]/max(values))*100
-    ma_now=sum(values[-10:])/10;ma_before=sum(values[-15:-5])/10
+    window=min(10,max(2,n//2));shift=min(5,n-window)
+    ma_now=sum(values[-window:])/window;ma_before=sum(values[-window-shift:-shift])/window
     if not (gain>0 and slope>0 and r2>=0.55 and hh and hl and drawdown<=max_pullback and values[-1]>=ma_now and ma_now>ma_before):return None
     return {'Gain %':gain,'Latest pullback %':latest_pullback,'Largest pullback %':drawdown,
         'Trend consistency':round(r2*100,1),'Price Date':points[-1][0],'Price chart':values}
 
 
+def nse_steady_load_history(symbols_tuple,period):
+    sessions=STEADY_PERIODS[period]
+    if sessions<=504:
+        classic_period_snapshot(symbols_tuple,'2y' if sessions>252 else '1y')
+        return
+    state=price_request_state();saved=state['classic'].setdefault('steady_max',{})
+    shared=st.session_state.get('shared_nse_price_cache',{}).get('records',{})
+    todo=[]
+    for symbol in symbols_tuple:
+        candidates=[shared.get(symbol)]+[bucket.get(symbol,{}).get('record') for bucket in state['classic'].values()]
+        if not any(r and len(r.get('closes',[]))>=sessions+1 for r in candidates):
+            entry=saved.get(symbol)
+            if not entry or time.monotonic()-entry.get('saved_at',0)>=900:todo.append(symbol)
+    progress=st.progress(0);status=st.empty();notice='';empty_batches=0
+    try:
+        for offset in range(0,len(todo),70):
+            batch=todo[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
+            try:
+                downloaded,limited=limited_price_download(tickers,period='max',interval='1d',group_by='ticker',auto_adjust=False,progress=False)
+            except Exception as exc:
+                notice='Historical downloads stopped. Saved prices retained. '+str(exc);break
+            found=0
+            for symbol,ticker in zip(batch,tickers):
+                frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
+                if frame.empty or 'Close' not in frame:continue
+                close=pd.to_numeric(frame['Close'],errors='coerce').dropna();close=close[close>0].sort_index()
+                if close.empty:continue
+                closes=[[pd.Timestamp(d).date().isoformat(),float(v)] for d,v in close.items()]
+                saved[symbol]={'record':{'closes':closes,'last_date':closes[-1][0]},'saved_at':time.monotonic()};found+=1
+            progress.progress(min(offset+len(batch),len(todo))/max(1,len(todo)))
+            status.caption(f'Long history checked: {min(offset+len(batch),len(todo)):,}/{len(todo):,}')
+            empty_batches=empty_batches+1 if not found else 0
+            if limited or empty_batches>=2:
+                notice='Price service returned limited / unavailable data. Saved prices retained.';break
+    finally:progress.empty();status.empty()
+    st.session_state['classic_load_notice']=notice
+
+
 def render_nse_steady_view(group,default_symbols):
     st.markdown('#### 📈 Steady Uptrend')
     controls=st.columns(2)
-    period=controls[0].selectbox('Pattern period',['1 Month','3 Months','6 Months'],key='steady_period')
+    period=controls[0].selectbox('Pattern period',list(STEADY_PERIODS),index=2,key='steady_period')
     maximum=controls[1].number_input('Maximum pullback %',min_value=1.0,max_value=50.0,value=15.0,step=1.0,key='steady_pullback')
-    st.caption('Daily closing prices: positive trend, last two confirmed swing highs and lows rising, trend consistency ≥55%, rising 10-day average and pullbacks within your limit. This is a pattern screen, not a prediction. Splits / corporate actions can affect unadjusted prices.')
+    st.caption('Daily closing prices: positive trend, last two confirmed swing highs and lows rising, trend consistency ≥55%, rising moving average and pullbacks within your limit. This is a pattern screen, not a prediction. Splits / corporate actions can affect unadjusted prices.')
     state=st.session_state.setdefault('nse_steady_data',{})
     if st.button('Load / Update uptrend data',type='primary',key='steady_load'):
         with loading_stopwatch('Loading prices and sector labels for uptrend patterns…'):
@@ -1915,7 +1956,7 @@ def render_nse_steady_view(group,default_symbols):
                 catalog=nse_sector_constituents('Total Market' if group=='All NSE' else group)
                 symbols=list(default_symbols) if group=='All NSE' else catalog.Symbol.tolist()
                 metadata={str(r.Symbol):{'company':str(r['Company Name']),'sector':str(r.Industry)} for _,r in catalog.iterrows()}
-                classic_period_snapshot(tuple(symbols),'1y')
+                nse_steady_load_history(tuple(symbols),period)
                 state.update(group=group,symbols=symbols,metadata=metadata)
             except Exception as exc:st.error('Could not load uptrend data: '+str(exc));return
     prior=st.session_state.get('nse_percentage_data',{})
@@ -1923,7 +1964,7 @@ def render_nse_steady_view(group,default_symbols):
     symbols=active.get('symbols',list(default_symbols));metadata=active.get('metadata',{})
     shared=st.session_state.get('shared_nse_price_cache',{}).get('records',{})
     saved=price_request_state()['classic'];rows=[];available=0
-    sessions=NSE_PERCENT_PERIODS[period]
+    sessions=STEADY_PERIODS[period]
     for symbol in symbols:
         candidates=[shared.get(symbol)]+[bucket.get(symbol,{}).get('record') for bucket in saved.values()]
         candidates=[r for r in candidates if r and len(r.get('closes',[]))>=sessions+1]
@@ -1935,7 +1976,7 @@ def render_nse_steady_view(group,default_symbols):
         if pattern:
             info=metadata.get(symbol,{})
             rows.append({'Symbol':symbol,'Stock Name':info.get('company',symbol),'Sector':info.get('sector','Unclassified'),**pattern})
-    st.caption(f'{available:,}/{len(symbols):,} stocks have enough saved history · {len(rows):,} match. Changing period or pullback limit reuses saved prices.')
+    st.caption(f'{available:,}/{len(symbols):,} stocks have enough saved history · {len(rows):,} match. Changing period or pullback limit reuses saved prices. Click Load / Update if the longer period needs more history. Years require 252 trading sessions each; 25 years requires 6,301 daily closes.')
     if st.session_state.get('classic_load_notice'):st.warning(st.session_state['classic_load_notice'])
     if not rows:
         st.info('No matching patterns in available history. Load prices if coverage is incomplete, or change the period / pullback limit.');return
