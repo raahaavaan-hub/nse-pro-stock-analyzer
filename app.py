@@ -19,6 +19,56 @@ from urllib.parse import quote_plus
 st.set_page_config(page_title="NSE Pro Market Terminal V14", page_icon="📈", layout="wide")
 
 
+def require_private_login():
+    """Server-side gate: no app content or data loads before authentication."""
+    import hmac
+    import hashlib
+    try:password=st.secrets.get('app_password','')
+    except Exception:password=''
+    if not isinstance(password,str) or len(password)<12:
+        st.title('🔒 Private app')
+        st.info('Owner setup required: add app_password (at least 12 characters) to Streamlit Secrets. The app stays locked until configured.')
+        st.stop()
+    fingerprint=hashlib.sha256(password.encode('utf-8')).hexdigest()
+    authenticated=st.session_state.get('_private_login_version')==fingerprint
+    last=st.session_state.get('_private_last_activity',0)
+    if authenticated and time.time()-last<1800:
+        st.session_state['_private_last_activity']=time.time()
+        if st.sidebar.button('🔒 Log out',key='_private_logout'):
+            st.session_state.clear()
+            st.rerun()
+        return
+    st.session_state.pop('_private_login_version',None)
+    st.title('🔒 Private app')
+    st.caption('Enter your password to open all pages. Sessions lock after 30 minutes without app activity.')
+    wait_until=st.session_state.get('_private_retry_after',0)
+    if time.time()<wait_until:
+        st.warning('Too many attempts in this session. Please wait a minute and try again.')
+        st.stop()
+    def verify():
+        attempt=st.session_state.pop('_private_password_input','')
+        if hmac.compare_digest(str(attempt).encode('utf-8'),password.encode('utf-8')):
+            st.session_state['_private_login_version']=fingerprint
+            st.session_state['_private_last_activity']=time.time()
+            st.session_state['_private_failures']=0
+            st.session_state['_private_error']=False
+        else:
+            count=st.session_state.get('_private_failures',0)+1
+            st.session_state['_private_failures']=count
+            st.session_state['_private_error']=True
+            if count>=5:
+                st.session_state['_private_retry_after']=time.time()+60
+                st.session_state['_private_failures']=0
+    with st.form('_private_login_form'):
+        st.text_input('Password',type='password',key='_private_password_input')
+        st.form_submit_button('Unlock',on_click=verify)
+    if st.session_state.get('_private_error'):st.error('Incorrect password.')
+    st.stop()
+
+
+require_private_login()
+
+
 @contextmanager
 def loading_stopwatch(message):
     """Live browser timer during blocking work; final elapsed time uses server clock."""
@@ -1943,6 +1993,19 @@ def nse_steady_load_history(symbols_tuple,period):
     st.session_state['classic_load_notice']=notice
 
 
+def nse_steady_valuation(info):
+    """Latest available valuation; market cap in INR crore, missing stays blank."""
+    import math
+    def number(key):
+        try:
+            value=float(info.get(key))
+            return value if math.isfinite(value) else None
+        except (TypeError,ValueError):return None
+    cap=number('marketCap')
+    return {'Market Cap (₹ Cr)':cap/10000000 if cap is not None and cap>0 else None,
+            'P/E':number('trailingPE'),'P/B':number('priceToBook')}
+
+
 def render_nse_steady_view(group,default_symbols):
     st.markdown('#### 📈 Steady Uptrend')
     controls=st.columns(2)
@@ -1984,7 +2047,26 @@ def render_nse_steady_view(group,default_symbols):
     sectors=sorted(frame.Sector.unique())
     selected=st.multiselect('Sectors',sectors,default=sectors,key='steady_sectors_'+group)
     frame=frame[frame.Sector.isin(selected)].reset_index(drop=True)
+    valuations=st.session_state.setdefault('nse_steady_valuations',{})
+    st.caption('Valuation details are latest available, not historical values for the selected pattern period. Market cap is in ₹ crore; P/E is trailing. Blank means unavailable. Loading details does not change the pattern filter.')
+    if st.button('Load valuation details for filtered matches',key='steady_valuation_load',disabled=frame.empty):
+        with loading_stopwatch('Loading market cap, P/E and P/B for matching stocks…'):
+            progress=st.progress(0.0)
+            for i,symbol in enumerate(frame.Symbol.tolist()):
+                valuations[symbol]=nse_steady_valuation(fundamentals_for_stock(symbol))
+                progress.progress((i+1)/len(frame))
+            progress.empty()
+    for column in ['Market Cap (₹ Cr)','P/E','P/B']:
+        frame[column]=[valuations.get(symbol,{}).get(column) for symbol in frame.Symbol]
+    columns=list(frame.columns)
+    for column in ['Market Cap (₹ Cr)','P/E','P/B']:columns.remove(column)
+    location=columns.index('Sector')+1
+    columns[location:location]=['Market Cap (₹ Cr)','P/E','P/B']
+    frame=frame[columns]
     st.dataframe(frame,hide_index=True,use_container_width=True,height=min(650,38+len(frame)*35),column_config={
+        'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.2f'),
+        'P/E':st.column_config.NumberColumn(format='%.2f'),
+        'P/B':st.column_config.NumberColumn(format='%.2f'),
         'Price chart':st.column_config.LineChartColumn('Price chart',width='medium'),
         'Gain %':st.column_config.NumberColumn(format='%.2f%%'),
         'Latest pullback %':st.column_config.NumberColumn(format='%.2f%%'),
