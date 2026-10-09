@@ -19,55 +19,6 @@ from urllib.parse import quote_plus
 st.set_page_config(page_title="NSE Pro Market Terminal V14", page_icon="📈", layout="wide")
 
 
-def require_private_login():
-    """Server-side gate: no app content or data loads before authentication."""
-    import hmac
-    import hashlib
-    try:password=st.secrets.get('app_password','')
-    except Exception:password=''
-    if not isinstance(password,str) or len(password)<12:
-        st.title('🔒 Private app')
-        st.info('Owner setup required: add app_password (at least 12 characters) to Streamlit Secrets. The app stays locked until configured.')
-        st.stop()
-    fingerprint=hashlib.sha256(password.encode('utf-8')).hexdigest()
-    authenticated=st.session_state.get('_private_login_version')==fingerprint
-    last=st.session_state.get('_private_last_activity',0)
-    if authenticated and time.time()-last<1800:
-        st.session_state['_private_last_activity']=time.time()
-        if st.sidebar.button('🔒 Log out',key='_private_logout'):
-            st.session_state.clear()
-            st.rerun()
-        return
-    st.session_state.pop('_private_login_version',None)
-    st.title('🔒 Private app')
-    st.caption('Enter your password to open all pages. Sessions lock after 30 minutes without app activity.')
-    wait_until=st.session_state.get('_private_retry_after',0)
-    if time.time()<wait_until:
-        st.warning('Too many attempts in this session. Please wait a minute and try again.')
-        st.stop()
-    def verify():
-        attempt=st.session_state.pop('_private_password_input','')
-        if hmac.compare_digest(str(attempt).encode('utf-8'),password.encode('utf-8')):
-            st.session_state['_private_login_version']=fingerprint
-            st.session_state['_private_last_activity']=time.time()
-            st.session_state['_private_failures']=0
-            st.session_state['_private_error']=False
-        else:
-            count=st.session_state.get('_private_failures',0)+1
-            st.session_state['_private_failures']=count
-            st.session_state['_private_error']=True
-            if count>=5:
-                st.session_state['_private_retry_after']=time.time()+60
-                st.session_state['_private_failures']=0
-    with st.form('_private_login_form'):
-        st.text_input('Password',type='password',key='_private_password_input')
-        st.form_submit_button('Unlock',on_click=verify)
-    if st.session_state.get('_private_error'):st.error('Incorrect password.')
-    st.stop()
-
-
-require_private_login()
-
 
 @contextmanager
 def loading_stopwatch(message):
@@ -1921,7 +1872,12 @@ def nse_percentage_style(frame):
             elif column=='Sector / Business':styles[i]='background-color:'+sector_colours[row[column]]+';color:#312e81'
             elif column=='No.':styles[i]='background-color:#e0e7ff;color:#3730a3;font-weight:bold'
         return styles
-    return frame.style.apply(colour_row,axis=1).format({'Change %':'{:+.2f}%'})
+    formats={'Change %':'{:+.2f}%'}
+    for col in ['Market Cap (₹ Cr)','P/E','P/B']:
+        if col in frame:formats[col]='{:,.2f}'
+    for col in ['Promoter %','FII %','DII %']:
+        if col in frame:formats[col]='{:.2f}%'
+    return frame.style.apply(colour_row,axis=1).format(formats,na_rep='—')
 
 
 STEADY_PERIODS={'1 Week':5,'2 Weeks':10,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'2 Years':504,'5 Years':1260,'10 Years':2520,'15 Years':3780,'25 Years':6300}
@@ -2075,6 +2031,12 @@ def render_nse_steady_view(group,default_symbols):
     st.download_button('Download uptrend matches',frame.drop(columns=['Price chart']).to_csv(index=False),'steady_uptrend.csv','text/csv',key='steady_csv')
 
 
+
+def nse_screener_url(symbol):
+    from urllib.parse import quote
+    return 'https://www.screener.in/company/'+quote(str(symbol).removesuffix('.NS'),safe='')+'/'
+
+
 def render_nse_percentage_view(group,default_symbols):
     st.markdown('#### 📊 By Percentage')
     controls=st.columns([2,1,1])
@@ -2115,9 +2077,11 @@ def render_nse_percentage_view(group,default_symbols):
     if st.session_state.get('classic_load_notice'):st.warning(st.session_state['classic_load_notice'])
     if available==0:st.info('Click Load / Update percentage data. Changing the threshold or Gainer/Loser uses saved prices without downloading again.');return
     if result.empty:st.info(f'No stocks match {direction.lower()} ≥ {threshold:g}% for {period} in the available data.');return
+    result=result.copy()
+    result['Screener']=[nse_screener_url(symbol) for symbol in result.Symbol]
     result.insert(0,'No.',range(1,len(result)+1))
-    st.caption('🟢 Gains · 🔴 Falls · Coloured sector cells identify groups')
-    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35))
+    st.caption('🟢 Gains · 🔴 Falls · Coloured sector cells identify groups. Click View on Screener to open the stock’s details in a new tab.')
+    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
     st.download_button('Download matching stocks',result.to_csv(index=False),'nse_percentage_matches.csv','text/csv',key='nse_pct_csv')
 
 
