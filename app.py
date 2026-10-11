@@ -2256,6 +2256,16 @@ def fast_percentage_centered_table(frame):
     st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:10px 8px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
 
 
+def fast_percentage_filter_sort(frame,min_cap=None,max_cap=None,sort_by='Percentage Change',sort_order='High → Low'):
+    result=frame.copy()
+    result['Market Cap (₹ Cr)']=pd.to_numeric(result['Market Cap (₹ Cr)'],errors='coerce')
+    if min_cap is not None:result=result[result['Market Cap (₹ Cr)']>=min_cap]
+    if max_cap is not None:result=result[result['Market Cap (₹ Cr)']<=max_cap]
+    column='Market Cap (₹ Cr)' if sort_by=='Market Cap' else 'Change %'
+    result[column]=pd.to_numeric(result[column],errors='coerce')
+    return result.sort_values(column,ascending=sort_order=='Low → High',na_position='last',kind='mergesort').reset_index(drop=True)
+
+
 def render_fast_percentage():
     st.markdown('## ⚡ Fast — By Percentage')
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
@@ -2265,6 +2275,20 @@ def render_fast_percentage():
     period=controls[1].selectbox('Trading period',list(NSE_PERCENT_PERIODS),key='fast_period')
     direction=controls[2].selectbox('Show',['Gainer','Loser'],key='fast_direction')
     threshold=controls[3].number_input('Minimum move %',min_value=0.0,value=50.0,step=5.0,key='fast_threshold')
+    extra=st.columns(4)
+    min_text=extra[0].text_input('Min market cap (₹ crore)',placeholder='No minimum',key='fast_min_cap')
+    max_text=extra[1].text_input('Max market cap (₹ crore)',placeholder='No maximum',key='fast_max_cap')
+    sort_by=extra[2].selectbox('Sort by',['Percentage Change','Market Cap'],key='fast_sort_by')
+    sort_order=extra[3].selectbox('Order',['High → Low','Low → High'],key='fast_sort_order')
+    try:
+        min_cap=float(min_text.replace(',','').strip()) if min_text.strip() else None
+        max_cap=float(max_text.replace(',','').strip()) if max_text.strip() else None
+        if any(value is not None and (not np.isfinite(value) or value<0) for value in (min_cap,max_cap)):
+            raise ValueError('Use a finite, non-negative amount.')
+        if min_cap is not None and max_cap is not None and min_cap>max_cap:
+            raise ValueError('Minimum market cap must not exceed maximum.')
+    except ValueError as exc:
+        st.error('Check market-cap limits: '+str(exc));return
     buttons=st.columns(3)
     import_existing=buttons[0].button('Use already loaded prices',key='fast_import')
     update=buttons[1].button('Update prices',type='primary',key='fast_update')
@@ -2307,6 +2331,9 @@ def render_fast_percentage():
                 caps={symbol:store['meta'][symbol] for symbol in result.Symbol}
                 result['Nifty Membership']=[caps[s].get('membership','Unavailable') for s in result.Symbol]
                 result['Market Cap (₹ Cr)']=[caps[s].get('cap',np.nan) for s in result.Symbol]
+    result=fast_percentage_filter_sort(result,min_cap,max_cap,sort_by,sort_order)
+    if min_cap is not None or max_cap is not None:
+        st.caption('Market-cap limits use saved values in ₹ crore. Stocks without a saved cap are excluded. Use Update Nifty labels / market caps to fill them.')
     st.caption(f'{table["Change %"].notna().sum() if "Change %" in table else table["return:"+period].notna().sum():,}/{len(table):,} stocks have sufficient history · {len(result):,} match. Price dates shown per stock; saved data may be old until updated.')
     st.caption('First build downloads up to 5 years. Later updates merge recent dates with a 7-day overlap, without downloading the whole history. Older gaps are not automatically audited. Local cache survives browser sessions but hosting resets may erase it; Google Sheet backup is not connected in this trial.')
     if result.empty:st.info('No saved stocks match this filter.');return
