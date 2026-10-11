@@ -1859,7 +1859,7 @@ def nse_percentage_filter(frame,direction,threshold):
 
 def nse_percentage_style(frame):
     palette=['#dbeafe','#ede9fe','#fef3c7','#cffafe','#fce7f3','#e0e7ff']
-    sector_colours={sector:palette[i%len(palette)] for i,sector in enumerate(sorted(frame['Sector / Business'].unique()))}
+    sector_colours={sector:palette[i%len(palette)] for i,sector in enumerate(sorted(frame['Sector / Business'].unique()) if 'Sector / Business' in frame else [])}
     def colour_row(row):
         base='#f8fafc' if row.name%2 else '#ffffff'
         styles=['background-color:'+base+';color:#172033' for _ in row]
@@ -1873,7 +1873,7 @@ def nse_percentage_style(frame):
             elif column=='No.':styles[i]='background-color:#e0e7ff;color:#3730a3;font-weight:bold'
         return styles
     formats={'Change %':'{:+.2f}%'}
-    for col in ['Market Cap (₹ Cr)','P/E','P/B']:
+    for col in ['Market Cap (₹ Cr)','P/E','P/B','Latest Price (₹)']:
         if col in frame:formats[col]='{:,.0f}' if col=='Market Cap (₹ Cr)' else '{:,.2f}'
     for col in ['Promoter %','FII %','DII %']:
         if col in frame:formats[col]='{:.2f}%'
@@ -2274,8 +2274,12 @@ def render_fast_percentage():
     st.caption(f'{table["Change %"].notna().sum() if "Change %" in table else table["return:"+period].notna().sum():,}/{len(table):,} stocks have sufficient history · {len(result):,} match. Price dates shown per stock; saved data may be old until updated.')
     st.caption('First build downloads up to 5 years. Later updates merge recent dates with a 7-day overlap, without downloading the whole history. Older gaps are not automatically audited. Local cache survives browser sessions but hosting resets may erase it; Google Sheet backup is not connected in this trial.')
     if result.empty:st.info('No saved stocks match this filter.');return
+    latest={symbol:entry['record']['closes'][-1][1] for symbol,entry in store['records'].items() if entry['record'].get('closes')}
+    result['Latest Price (₹)']=result.Symbol.map(latest)
+    result['Date']=pd.to_datetime(result['Price Date'],errors='coerce').dt.strftime('%d/%m/%Y').fillna('Unavailable')
+    result=result[['Stock Name','Date','Change %','Latest Price (₹)','Market Cap (₹ Cr)','Nifty Membership','Screener']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
-    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
+    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Latest Price (₹)':st.column_config.NumberColumn(format='%.2f'),'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
     st.download_button('Download Fast results',result.to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
 
