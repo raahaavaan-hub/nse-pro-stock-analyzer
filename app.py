@@ -2407,18 +2407,20 @@ def independent_stock_chart_data(symbol,mode,selected_date,period):
                  '3 Months':pd.DateOffset(months=3),'6 Months':pd.DateOffset(months=6),
                  '1 Year':pd.DateOffset(years=1),'2 Years':pd.DateOffset(years=2),'5 Years':pd.DateOffset(years=5)}
         start=(pd.Timestamp(today)-offsets[period]).date()
-        options={'start':start.isoformat(),'end':(today+timedelta(days=1)).isoformat(),'interval':'1d'}
+        interval='15m' if period=='1 Week' else '60m' if period=='1 Month' else '1d'
+        options={'start':start.isoformat(),'end':(today+timedelta(days=1)).isoformat(),'interval':interval}
     frame,limited=limited_price_download([symbol+'.NS'],auto_adjust=False,progress=False,**options)
     if limited:raise PriceRateLimited('Price provider limited requests. Please try later.')
     if frame.empty:return frame
     if isinstance(frame.columns,pd.MultiIndex):frame.columns=frame.columns.get_level_values(0)
     frame=frame.dropna(subset=['Open','High','Low','Close']).copy()
     index=pd.DatetimeIndex(frame.index)
-    if intraday:
+    if options['interval']!='1d':
         index=index.tz_localize('Asia/Kolkata') if index.tz is None else index.tz_convert('Asia/Kolkata')
         frame.index=index
-        target=date.fromisoformat(selected_date) if mode=='Date' else index[-1].date()
-        frame=frame[index.date==target]
+        if intraday:
+            target=date.fromisoformat(selected_date) if mode=='Date' else index[-1].date()
+            frame=frame[index.date==target]
     return frame
 
 
@@ -2457,11 +2459,26 @@ def render_independent_stock_charts():
     st.markdown('#### '+html.escape(title))
     if frame.empty:
         st.info('No prices available for this selection. A selected date may be a holiday, or its intraday history may be unavailable from the provider. Another day is not substituted.');return
-    colour='#16a34a' if float(frame.Close.iloc[-1])>=float(frame.Close.iloc[0]) else '#dc2626'
-    fig=go.Figure(go.Candlestick(x=frame.index,open=frame.Open,high=frame.High,low=frame.Low,close=frame.Close,increasing_line_color='#16a34a',decreasing_line_color='#dc2626',name='OHLC'))
-    fig.update_layout(height=320,xaxis_rangeslider_visible=False,margin=dict(l=10,r=10,t=10,b=10),xaxis_title='Time (IST)' if mode=='Date' or period=='1 Day' else 'Date',yaxis_title='Price (₹)',showlegend=False)
-    st.plotly_chart(fig,use_container_width=True)
-    st.caption('Displayed data: '+frame.index[0].strftime('%d/%m/%Y')+' to '+frame.index[-1].strftime('%d/%m/%Y')+'. Date / 1 Day charts use 5-minute prices when available; longer periods use daily OHLC candles. Prices are cached for 15 minutes.')
+    intraday=mode=='Date' or period in ['1 Day','1 Week','1 Month']
+    labels=[stamp.strftime('%d/%m %H:%M' if intraday else '%d/%m/%Y') for stamp in frame.index]
+    fig=go.Figure(go.Candlestick(x=list(range(len(frame))),open=frame.Open,high=frame.High,low=frame.Low,close=frame.Close,
+        increasing=dict(line=dict(color='#26a641',width=1),fillcolor='#26a641'),
+        decreasing=dict(line=dict(color='#ef5350',width=1),fillcolor='#ef5350'),
+        text=labels,hoverinfo='text+y',name='OHLC',whiskerwidth=0.25))
+    ticks=sorted(set(np.linspace(0,len(frame)-1,min(6,len(frame)),dtype=int)))
+    fig.update_layout(height=380,template='plotly_white',paper_bgcolor='white',plot_bgcolor='white',
+        xaxis_rangeslider_visible=False,margin=dict(l=12,r=65,t=12,b=35),showlegend=False,dragmode='pan',
+        xaxis=dict(tickmode='array',tickvals=ticks,ticktext=[labels[i] for i in ticks],
+                   range=[-0.8,max(len(frame)+1,40)],showgrid=True,gridcolor='#f1f5f9',zeroline=False,title=None),
+        yaxis=dict(side='right',showgrid=True,gridcolor='#f1f5f9',zeroline=False,tickformat=',.2f',title=None),
+        font=dict(color='#475569',size=11))
+    latest=float(frame.Close.iloc[-1]);last_colour='#26a641' if latest>=float(frame.Open.iloc[-1]) else '#ef5350'
+    fig.add_hline(y=latest,line_width=1,line_dash='dash',line_color=last_colour)
+    fig.add_annotation(x=1,xref='paper',y=latest,yref='y',text=f'₹{latest:,.2f}',showarrow=False,
+                       xanchor='left',bgcolor=last_colour,font=dict(color='white',size=11),borderpad=3)
+    st.plotly_chart(fig,use_container_width=True,config={'scrollZoom':True,'displaylogo':False})
+    st.caption('Displayed data: '+frame.index[0].strftime('%d/%m/%Y')+' to '+frame.index[-1].strftime('%d/%m/%Y')+'. Candles: Date / 1 Day = 5 minutes; 1 Week = 15 minutes; 1 Month = 1 hour; longer periods = daily. Drag to pan, scroll to zoom. Prices are cached for 15 minutes.')
+
 
 
 def render_nse_sector_view(group):
