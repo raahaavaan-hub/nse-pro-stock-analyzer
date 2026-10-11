@@ -2308,20 +2308,54 @@ def fast_percentage_filter_sort(frame,min_cap=None,max_cap=None,sort_by='Percent
     return result.sort_values(column,ascending=sort_order=='Low → High',na_position='last',kind='mergesort').reset_index(drop=True)
 
 
+FAST_SETTING_DEFAULTS={'fast_universe':'NIFTY 50','fast_period':'1 Day','fast_direction':'Gainer',
+                       'fast_threshold':50.0,'fast_min_cap':'','fast_max_cap':'',
+                       'fast_sort_by':'Percentage Change','fast_sort_order':'High → Low'}
+
+
+def fast_restore_settings(store):
+    choices={'fast_universe':['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],
+             'fast_period':list(NSE_PERCENT_PERIODS),'fast_direction':['Gainer','Loser'],
+             'fast_sort_by':['Percentage Change','Market Cap'],'fast_sort_order':['High → Low','Low → High']}
+    with store['lock']:saved=dict(store.get('fast_settings',{}))
+    for key,default in FAST_SETTING_DEFAULTS.items():
+        if key in st.session_state:continue
+        value=saved.get(key,default)
+        if key in choices and value not in choices[key]:value=default
+        if key=='fast_threshold':
+            try:
+                value=float(value)
+                if not np.isfinite(value) or value<0:value=default
+            except (TypeError,ValueError):value=default
+        if key in ['fast_min_cap','fast_max_cap'] and not isinstance(value,str):value=default
+        st.session_state[key]=value
+
+
+def fast_save_settings():
+    import sqlite3
+    store=fast_percentage_store()
+    with store['lock']:
+        settings={key:st.session_state.get(key,default) for key,default in FAST_SETTING_DEFAULTS.items()}
+        with sqlite3.connect(store['path'],timeout=30) as db:
+            db.execute('INSERT OR REPLACE INTO config(name,payload) VALUES (?,?)',('fast_settings',json.dumps(settings)))
+        store['fast_settings']=settings
+
+
 def render_fast_percentage():
     st.markdown('## ⚡ Fast — By Percentage')
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
     store=fast_percentage_store()
+    fast_restore_settings(store)
     controls=st.columns([2,2,1,1])
-    group=controls[0].selectbox('Universe',['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],index=1,key='fast_universe')
-    period=controls[1].selectbox('Trading period',list(NSE_PERCENT_PERIODS),key='fast_period')
-    direction=controls[2].selectbox('Show',['Gainer','Loser'],key='fast_direction')
-    threshold=controls[3].number_input('Minimum move %',min_value=0.0,value=50.0,step=5.0,key='fast_threshold')
+    group=controls[0].selectbox('Universe',['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],key='fast_universe',on_change=fast_save_settings)
+    period=controls[1].selectbox('Trading period',list(NSE_PERCENT_PERIODS),key='fast_period',on_change=fast_save_settings)
+    direction=controls[2].selectbox('Show',['Gainer','Loser'],key='fast_direction',on_change=fast_save_settings)
+    threshold=controls[3].number_input('Minimum move %',min_value=0.0,step=5.0,key='fast_threshold',on_change=fast_save_settings)
     extra=st.columns(4)
-    min_text=extra[0].text_input('Min market cap (₹ crore)',placeholder='No minimum',key='fast_min_cap')
-    max_text=extra[1].text_input('Max market cap (₹ crore)',placeholder='No maximum',key='fast_max_cap')
-    sort_by=extra[2].selectbox('Sort by',['Percentage Change','Market Cap'],key='fast_sort_by')
-    sort_order=extra[3].selectbox('Order',['High → Low','Low → High'],key='fast_sort_order')
+    min_text=extra[0].text_input('Min market cap (₹ crore)',placeholder='No minimum',key='fast_min_cap',on_change=fast_save_settings)
+    max_text=extra[1].text_input('Max market cap (₹ crore)',placeholder='No maximum',key='fast_max_cap',on_change=fast_save_settings)
+    sort_by=extra[2].selectbox('Sort by',['Percentage Change','Market Cap'],key='fast_sort_by',on_change=fast_save_settings)
+    sort_order=extra[3].selectbox('Order',['High → Low','Low → High'],key='fast_sort_order',on_change=fast_save_settings)
     try:
         min_cap=float(min_text.replace(',','').strip()) if min_text.strip() else None
         max_cap=float(max_text.replace(',','').strip()) if max_text.strip() else None
