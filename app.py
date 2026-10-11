@@ -2124,6 +2124,161 @@ def render_nse_percentage_view(group,default_symbols):
     st.download_button('Download matching stocks',result.to_csv(index=False),'nse_percentage_matches.csv','text/csv',key='nse_pct_csv')
 
 
+@st.cache_resource(show_spinner=False)
+def fast_percentage_store():
+    import sqlite3
+    folder=Path('.nse_fast');folder.mkdir(exist_ok=True)
+    store={'lock':threading.RLock(),'records':{},'meta':{},'groups':{},'frame':pd.DataFrame(),'path':str(folder/'percentage.sqlite3'),'version':0}
+    with sqlite3.connect(store['path']) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS stocks (symbol TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS config (name TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+        for symbol,payload in db.execute('SELECT symbol,payload FROM stocks'):
+            try:store['records'][symbol]=json.loads(payload)
+            except Exception:pass
+        for name,payload in db.execute('SELECT name,payload FROM config'):
+            try:store[name]=json.loads(payload)
+            except Exception:pass
+    fast_percentage_rebuild(store)
+    return store
+
+
+def fast_percentage_merge(old,record,full=False):
+    previous=(old or {}).get('record',{})
+    dates={str(day):float(value) for day,value in previous.get('closes',[]) if float(value)>0}
+    for day,value in (record or {}).get('closes',[]):
+        if np.isfinite(float(value)) and float(value)>0:dates[str(day)]=float(value)
+    days=sorted(dates)[-1261:]
+    return {'record':{'closes':[[day,dates[day]] for day in days],'last_date':days[-1] if days else ''},
+            'full':bool(full or (old or {}).get('full'))}
+
+
+def fast_percentage_rebuild(store):
+    rows=[]
+    for symbol,entry in store['records'].items():
+        record=entry['record'];meta=store['meta'].get(symbol,{})
+        row={'Symbol':symbol,'Stock Name':meta.get('company',symbol),'Sector / Business':meta.get('sector','Unclassified'),
+             'Price Date':record.get('last_date',''),'Nifty Membership':meta.get('membership','Unavailable'),
+             'Market Cap (₹ Cr)':meta.get('cap',np.nan),'Screener':nse_screener_url(symbol)}
+        for period in NSE_PERCENT_PERIODS:row['return:'+period]=nse_percentage_return(record,period)
+        rows.append(row)
+    store['frame']=pd.DataFrame(rows);store['version']+=1
+
+
+def fast_percentage_save(store,symbols):
+    import sqlite3
+    with sqlite3.connect(store['path'],timeout=30) as db:
+        db.executemany('INSERT OR REPLACE INTO stocks VALUES (?,?)',[(symbol,json.dumps(store['records'][symbol])) for symbol in symbols if symbol in store['records']])
+        for name in ['meta','groups']:
+            db.execute('INSERT OR REPLACE INTO config VALUES (?,?)',(name,json.dumps(store[name])))
+
+
+def fast_percentage_import(store):
+    # Copy already downloaded prices; this does not request or alter old views.
+    changed=[]
+    sources=[st.session_state.get('shared_nse_price_cache',{}).get('records',{})]
+    for bucket in price_request_state()['classic'].values():sources.append({symbol:entry.get('record') for symbol,entry in bucket.items()})
+    for source in sources:
+        for symbol,record in source.items():
+            if not record or not record.get('closes'):continue
+            previous=store['records'].get(symbol)
+            current=fast_percentage_merge(previous,record)
+            if current!=previous:store['records'][symbol]=current;changed.append(symbol)
+    if changed:fast_percentage_save(store,set(changed));fast_percentage_rebuild(store)
+
+
+def fast_percentage_update(store,symbols):
+    from collections import defaultdict
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    requests_by_start=defaultdict(list)
+    for symbol in symbols:
+        entry=store['records'].get(symbol,{})
+        if entry.get('full') and entry.get('record',{}).get('last_date'):
+            start=(pd.Timestamp(entry['record']['last_date'])-pd.Timedelta(days=7)).date().isoformat()
+        else:start=None
+        requests_by_start[start].append(symbol)
+    total=len(symbols);done=0;notice='';progress=st.progress(0.0);status=st.empty()
+    try:
+        for start,group in requests_by_start.items():
+            for offset in range(0,len(group),70):
+                batch=group[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
+                opts={'start':start} if start else {'period':'5y'}
+                try:downloaded,limited=limited_price_download(tickers,interval='1d',group_by='ticker',auto_adjust=False,progress=False,**opts)
+                except Exception as exc:notice='Update stopped; saved prices retained. '+str(exc);return notice
+                changed=[]
+                for symbol,ticker in zip(batch,tickers):
+                    frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
+                    if frame.empty or 'Close' not in frame:continue
+                    record=market_cache_merge(None,frame,today)
+                    if record:
+                        store['records'][symbol]=fast_percentage_merge(store['records'].get(symbol),record,full=start is None)
+                        changed.append(symbol)
+                fast_percentage_save(store,changed)
+                done+=len(batch);progress.progress(done/max(total,1));status.caption(f'Updated {done:,}/{total:,} stocks · existing prices retained')
+                if limited:return 'Price provider limited requests. Saved prices retained; try updating later.'
+    finally:
+        progress.empty();status.empty();fast_percentage_rebuild(store)
+    return notice
+
+
+def render_fast_percentage():
+    st.markdown('## ⚡ Fast — By Percentage')
+    st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
+    store=fast_percentage_store()
+    controls=st.columns([2,2,1,1])
+    group=controls[0].selectbox('Universe',['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],index=1,key='fast_universe')
+    period=controls[1].selectbox('Trading period',list(NSE_PERCENT_PERIODS),key='fast_period')
+    direction=controls[2].selectbox('Show',['Gainer','Loser'],key='fast_direction')
+    threshold=controls[3].number_input('Minimum move %',min_value=0.0,value=50.0,step=5.0,key='fast_threshold')
+    buttons=st.columns(3)
+    import_existing=buttons[0].button('Use already loaded prices',key='fast_import')
+    update=buttons[1].button('Update prices',type='primary',key='fast_update')
+    details=buttons[2].button('Update Nifty labels / market caps',key='fast_details')
+    with store['lock']:
+        if import_existing:
+            with loading_stopwatch('Copying existing prices into Fast…'):fast_percentage_import(store)
+        if update:
+            with loading_stopwatch('Updating Fast prices…'):
+                try:
+                    if group=='All NSE':symbols=universe()
+                    else:
+                        catalog=nse_sector_constituents(group);symbols=catalog.Symbol.tolist()
+                        for _,r in catalog.iterrows():store['meta'].setdefault(r.Symbol,{}).update(company=str(r['Company Name']),sector=str(r.Industry))
+                    store['groups'][group]=symbols
+                    fast_percentage_import(store)
+                    notice=fast_percentage_update(store,symbols)
+                    if notice:st.warning(notice)
+                except Exception as exc:st.error('Update failed; saved data kept. '+str(exc))
+        table=store['frame'].copy()
+        symbols=store['groups'].get(group)
+        if symbols is not None and not table.empty:table=table[table.Symbol.isin(symbols)]
+        elif group!='All NSE':table=pd.DataFrame()
+        if table.empty:
+            st.info('Click Update prices once to build this universe. For a first trial, NIFTY 50 is selected. Later filter changes reuse the saved dataset.');return
+        result=table.rename(columns={'return:'+period:'Change %'})
+        result=result.drop(columns=[c for c in result if c.startswith('return:')])
+        result=nse_percentage_filter(result,direction,threshold)
+        if details:
+            with loading_stopwatch('Updating labels and market caps for filtered stocks…'):
+                memberships={}
+                for label,index in [('N50','NIFTY 50'),('N100','NIFTY 100'),('N500','NIFTY 500')]:
+                    try:memberships[label]=set(nse_sector_constituents(index).Symbol)
+                    except Exception:memberships[label]=None
+                for symbol in result.Symbol:
+                    meta=store['meta'].setdefault(symbol,{})
+                    meta['membership']=nse_membership_label(symbol,memberships)
+                    meta['cap']=nse_market_cap_crore(fundamentals_for_stock(symbol))
+                fast_percentage_save(store,[]);fast_percentage_rebuild(store)
+                caps={symbol:store['meta'][symbol] for symbol in result.Symbol}
+                result['Nifty Membership']=[caps[s].get('membership','Unavailable') for s in result.Symbol]
+                result['Market Cap (₹ Cr)']=[caps[s].get('cap',np.nan) for s in result.Symbol]
+    st.caption(f'{table["Change %"].notna().sum() if "Change %" in table else table["return:"+period].notna().sum():,}/{len(table):,} stocks have sufficient history · {len(result):,} match. Price dates shown per stock; saved data may be old until updated.')
+    st.caption('First build downloads up to 5 years. Later updates merge recent dates with a 7-day overlap, without downloading the whole history. Older gaps are not automatically audited. Local cache survives browser sessions but hosting resets may erase it; Google Sheet backup is not connected in this trial.')
+    if result.empty:st.info('No saved stocks match this filter.');return
+    result.insert(0,'No.',range(1,len(result)+1))
+    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
+    st.download_button('Download Fast results',result.to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
+
+
 def render_nse_sector_view(group):
     st.markdown('#### 🧩 Sector-wise Stocks')
     periods={'1 Day':1,'5 Days':5,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'5 Years':1260}
@@ -2195,7 +2350,7 @@ st.markdown("""<style>
 </style>""",unsafe_allow_html=True)
 
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
@@ -3004,6 +3159,9 @@ elif page=="🎯 Brokerage Calls":
         st.download_button("⬇️ Download Brokerage Calls CSV",df.to_csv(index=False).encode(),"brokerage_calls.csv","text/csv")
         st.info("Target and symbol are parsed only when clearly present in public news text. Blank means not confidently detected.")
 
+
+elif page=="⚡ Fast":
+    render_fast_percentage()
 
 elif page=="🌐 All NSE Performance":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE PERFORMANCE</div><h1>🌐 All NSE Performance</h1><p>Start with market statistics, then explore heat maps, then choose Classic Table or Smart Scanner.</p></div>",unsafe_allow_html=True)
