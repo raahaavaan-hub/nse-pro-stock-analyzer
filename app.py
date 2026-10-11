@@ -2239,9 +2239,28 @@ def fast_percentage_trend_svg(record,period):
     colour='#16a34a' if values[-1]>values[0] else '#dc2626' if values[-1]<values[0] else '#64748b'
     minimum=min(values);maximum=max(values);span=maximum-minimum
     indices=sorted(set([0,len(values)-1]+[round(i*(len(values)-1)/119) for i in range(min(120,len(values)))])) if len(values)>120 else list(range(len(values)))
-    points=' '.join(f'{4+112*i/(len(values)-1):.2f},{36-30*(values[i]-minimum)/span if span else 21:.2f}' for i in indices)
-    title=html.escape(f'{period}: ₹{values[0]:,.2f} → ₹{values[-1]:,.2f}. Saved closing prices; green/red shows net period change.')
-    return f'<svg xmlns="http://www.w3.org/2000/svg" width="120" height="42" viewBox="0 0 120 42" role="img" aria-label="{title}"><title>{title}</title><polyline points="{points}" fill="none" stroke="{colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>'
+    points=' '.join(f'{4+88*i/(len(values)-1):.2f},{22-18*(values[i]-minimum)/span if span else 13:.2f}' for i in indices)
+    ticks={
+        '1 Day':[(0,'Prev'),(1,'1d')],
+        '1 Week':[(1,'1d'),(3,'3d'),(5,'5d')],
+        '2 Weeks':[(1,'1d'),(5,'5d'),(10,'10d')],
+        '1 Month':[(5,'1w'),(10,'2w'),(21,'1m')],
+        '3 Months':[(21,'1m'),(42,'2m'),(63,'3m')],
+        '6 Months':[(21,'1m'),(63,'3m'),(126,'6m')],
+        '1 Year':[(63,'3m'),(126,'6m'),(252,'1y')],
+        '2 Years':[(126,'6m'),(252,'1y'),(504,'2y')],
+        '5 Years':[(252,'1y'),(756,'3y'),(1260,'5y')],
+    }[period]
+    available=len(values)-1
+    axis=''
+    for session,label in ticks:
+        if session>available:continue
+        x=4+88*session/available
+        anchor='start' if x<16 else 'end' if x>82 else 'middle'
+        axis+=f'<line x1="{x:.2f}" y1="24" x2="{x:.2f}" y2="26" stroke="#64748b"/><text x="{x:.2f}" y="33" text-anchor="{anchor}" font-size="8" fill="#334155">{label}</text>'
+    title=html.escape(f'{period}: ₹{values[0]:,.2f} → ₹{values[-1]:,.2f}. Saved closing prices; labels show elapsed trading sessions (1 week = 5, 1 month = 21).')
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="35" viewBox="0 0 96 35" role="img" aria-label="{title}"><title>{title}</title><polyline points="{points}" fill="none" stroke="{colour}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><line x1="4" y1="24" x2="92" y2="24" stroke="#cbd5e1" stroke-width="0.5"/>{axis}</svg>'
+
 
 
 def fast_percentage_centered_table(frame):
@@ -2249,11 +2268,11 @@ def fast_percentage_centered_table(frame):
     for column in display.select_dtypes(include=['object','string']).columns:
         display[column]=display[column].map(lambda value:html.escape(str(value)) if pd.notna(value) else '—')
     display['Screener']=[
-        '<a href="'+html.escape(str(url),quote=True)+'" target="_blank" rel="noopener noreferrer">View on Screener</a>' for url in frame['Screener']]
+        '<a href="'+html.escape(str(url),quote=True)+'" target="_blank" rel="noopener noreferrer">Screener ↗</a>' for url in frame['Screener']]
     if 'Trend' in frame:display['Trend']=frame['Trend']
     styled=nse_percentage_style(display).hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
     styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
-    st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:10px 8px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
+    st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:3px 5px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred svg{display:block;margin:auto}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
 
 
 def fast_percentage_filter_sort(frame,min_cap=None,max_cap=None,sort_by='Percentage Change',sort_order='High → Low'):
@@ -2344,7 +2363,7 @@ def render_fast_percentage():
     result['Trend']=[fast_percentage_trend_svg(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
     result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener','Trend']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
-    st.caption('Trend uses saved closes for the selected period: green = net increase, red = net decrease, grey = unchanged. Long periods are sampled for compact display.')
+    st.caption('Trend: green = net increase, red = decrease, grey = unchanged. Bottom labels show elapsed trading time: d = sessions, w = 5 sessions, m = 21 sessions, y = 252 sessions. Long graphs are sampled.')
     fast_percentage_centered_table(result)
     st.download_button('Download Fast results',result.drop(columns=['Trend']).to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
