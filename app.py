@@ -2148,7 +2148,9 @@ def fast_percentage_merge(old,record,full=False):
     for day,value in (record or {}).get('closes',[]):
         if np.isfinite(float(value)) and float(value)>0:dates[str(day)]=float(value)
     days=sorted(dates)[-1261:]
-    return {'record':{'closes':[[day,dates[day]] for day in days],'last_date':days[-1] if days else ''},
+    candles={str(row[0]):row for row in previous.get('ohlc',[])}
+    candles.update({str(row[0]):row for row in (record or {}).get('ohlc',[])})
+    return {'record':{'closes':[[day,dates[day]] for day in days],'ohlc':[candles[day] for day in days if day in candles],'last_date':days[-1] if days else ''},
             'full':bool(full or (old or {}).get('full'))}
 
 
@@ -2192,7 +2194,7 @@ def fast_percentage_update(store,symbols):
     requests_by_start=defaultdict(list)
     for symbol in symbols:
         entry=store['records'].get(symbol,{})
-        if entry.get('full') and entry.get('record',{}).get('last_date'):
+        if entry.get('full') and entry.get('record',{}).get('last_date') and entry.get('record',{}).get('ohlc'):
             start=(pd.Timestamp(entry['record']['last_date'])-pd.Timedelta(days=7)).date().isoformat()
         else:start=None
         requests_by_start[start].append(symbol)
@@ -2210,6 +2212,12 @@ def fast_percentage_update(store,symbols):
                     if frame.empty or 'Close' not in frame:continue
                     record=market_cache_merge(None,frame,today)
                     if record:
+                        record['ohlc']=[]
+                        if all(column in frame for column in ['Open','High','Low','Close']):
+                            for stamp,row in frame.iterrows():
+                                prices=[float(row[column]) for column in ['Open','High','Low','Close']]
+                                if all(np.isfinite(value) and value>0 for value in prices):
+                                    record['ohlc'].append([pd.Timestamp(stamp).date().isoformat(),*prices])
                         store['records'][symbol]=fast_percentage_merge(store['records'].get(symbol),record,full=start is None)
                         changed.append(symbol)
                 fast_percentage_save(store,changed)
@@ -2236,10 +2244,25 @@ def fast_percentage_trend_svg(record,period):
     count=NSE_PERCENT_PERIODS[period]
     values=[float(v) for _,v in history[-count-1:] if math.isfinite(float(v)) and float(v)>0]
     if len(values)<2:return 'Unavailable'
-    colour='#16a34a' if values[-1]>values[0] else '#dc2626' if values[-1]<values[0] else '#64748b'
-    minimum=min(values);maximum=max(values);span=maximum-minimum
-    indices=sorted(set([0,len(values)-1]+[round(i*(len(values)-1)/119) for i in range(min(120,len(values)))])) if len(values)>120 else list(range(len(values)))
-    points=' '.join(f'{4+88*i/(len(values)-1):.2f},{22-18*(values[i]-minimum)/span if span else 13:.2f}' for i in indices)
+    days=[str(day) for day,_ in history[-count-1:]][1:]
+    by_day={str(row[0]):row[1:5] for row in (record or {}).get('ohlc',[])}
+    if not days or any(day not in by_day for day in days):return 'Update prices for candles'
+    raw=[by_day[day] for day in days]
+    # Aggregate all sessions into at most 22 real OHLC candles for compact display.
+    size=max(1,math.ceil(len(raw)/22))
+    bars=[]
+    for start in range(0,len(raw),size):
+        group=raw[start:start+size]
+        bars.append((start,len(group),group[0][0],max(r[1] for r in group),min(r[2] for r in group),group[-1][3]))
+    minimum=min(r[4] for r in bars);maximum=max(r[3] for r in bars);span=maximum-minimum
+    y=lambda value:22-18*(value-minimum)/span if span else 13
+    candles=''
+    for start,length,opening,high,low,close in bars:
+        x=4+88*(start+length/2)/len(raw)
+        width=max(1,min(3,88*length/len(raw)*0.6))
+        colour='#16a34a' if close>=opening else '#dc2626'
+        top=min(y(opening),y(close));height=max(0.8,abs(y(opening)-y(close)))
+        candles+=f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{y(high):.2f}" y2="{y(low):.2f}" stroke="{colour}" stroke-width="0.8"/><rect x="{x-width/2:.2f}" y="{top:.2f}" width="{width:.2f}" height="{height:.2f}" fill="{colour}"/>'
     ticks={
         '1 Day':[(0,'Prev'),(1,'1d')],
         '1 Week':[(1,'1d'),(3,'3d'),(5,'5d')],
@@ -2258,8 +2281,8 @@ def fast_percentage_trend_svg(record,period):
         x=4+88*session/available
         anchor='start' if x<16 else 'end' if x>82 else 'middle'
         axis+=f'<line x1="{x:.2f}" y1="24" x2="{x:.2f}" y2="26" stroke="#64748b"/><text x="{x:.2f}" y="33" text-anchor="{anchor}" font-size="8" fill="#334155">{label}</text>'
-    title=html.escape(f'{period}: ₹{values[0]:,.2f} → ₹{values[-1]:,.2f}. Saved closing prices; labels show elapsed trading sessions (1 week = 5, 1 month = 21).')
-    return f'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="35" viewBox="0 0 96 35" role="img" aria-label="{title}"><title>{title}</title><polyline points="{points}" fill="none" stroke="{colour}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><line x1="4" y1="24" x2="92" y2="24" stroke="#cbd5e1" stroke-width="0.5"/>{axis}</svg>'
+    title=html.escape(f'{period}: ₹{values[0]:,.2f} → ₹{values[-1]:,.2f}. Candlesticks: green close ≥ open, red close < open. Long periods group sessions into up to 22 OHLC candles; labels show elapsed trading sessions (1 week = 5, 1 month = 21).')
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="35" viewBox="0 0 96 35" role="img" aria-label="{title}"><title>{title}</title>{candles}<line x1="4" y1="24" x2="92" y2="24" stroke="#cbd5e1" stroke-width="0.5"/>{axis}</svg>'
 
 
 
@@ -2363,7 +2386,7 @@ def render_fast_percentage():
     result['Trend']=[fast_percentage_trend_svg(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
     result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener','Trend']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
-    st.caption('Trend: green = net increase, red = decrease, grey = unchanged. Bottom labels show elapsed trading time: d = sessions, w = 5 sessions, m = 21 sessions, y = 252 sessions. Long graphs are sampled.')
+    st.caption('Candles: green = close ≥ open, red = close < open. Long periods combine sessions into up to 22 OHLC candles. Bottom labels: d = sessions, w = 5, m = 21, y = 252. Click Update prices once to add candles to an older saved dataset.')
     fast_percentage_centered_table(result)
     st.download_button('Download Fast results',result.drop(columns=['Trend']).to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
@@ -2389,7 +2412,7 @@ def independent_stock_chart_data(symbol,mode,selected_date,period):
     if limited:raise PriceRateLimited('Price provider limited requests. Please try later.')
     if frame.empty:return frame
     if isinstance(frame.columns,pd.MultiIndex):frame.columns=frame.columns.get_level_values(0)
-    frame=frame.dropna(subset=['Close']).copy()
+    frame=frame.dropna(subset=['Open','High','Low','Close']).copy()
     index=pd.DatetimeIndex(frame.index)
     if intraday:
         index=index.tz_localize('Asia/Kolkata') if index.tz is None else index.tz_convert('Asia/Kolkata')
@@ -2435,10 +2458,10 @@ def render_independent_stock_charts():
     if frame.empty:
         st.info('No prices available for this selection. A selected date may be a holiday, or its intraday history may be unavailable from the provider. Another day is not substituted.');return
     colour='#16a34a' if float(frame.Close.iloc[-1])>=float(frame.Close.iloc[0]) else '#dc2626'
-    fig=go.Figure(go.Scatter(x=frame.index,y=frame.Close,mode='lines',line=dict(color=colour,width=2),name='Price',hovertemplate='%{x}<br>₹%{y:,.2f}<extra></extra>'))
-    fig.update_layout(height=320,margin=dict(l=10,r=10,t=10,b=10),xaxis_title='Time (IST)' if mode=='Date' or period=='1 Day' else 'Date',yaxis_title='Price (₹)',showlegend=False)
+    fig=go.Figure(go.Candlestick(x=frame.index,open=frame.Open,high=frame.High,low=frame.Low,close=frame.Close,increasing_line_color='#16a34a',decreasing_line_color='#dc2626',name='OHLC'))
+    fig.update_layout(height=320,xaxis_rangeslider_visible=False,margin=dict(l=10,r=10,t=10,b=10),xaxis_title='Time (IST)' if mode=='Date' or period=='1 Day' else 'Date',yaxis_title='Price (₹)',showlegend=False)
     st.plotly_chart(fig,use_container_width=True)
-    st.caption('Displayed data: '+frame.index[0].strftime('%d/%m/%Y')+' to '+frame.index[-1].strftime('%d/%m/%Y')+'. Date / 1 Day charts use 5-minute prices when available; longer periods use daily closes. Prices are cached for 15 minutes.')
+    st.caption('Displayed data: '+frame.index[0].strftime('%d/%m/%Y')+' to '+frame.index[-1].strftime('%d/%m/%Y')+'. Date / 1 Day charts use 5-minute prices when available; longer periods use daily OHLC candles. Prices are cached for 15 minutes.')
 
 
 def render_nse_sector_view(group):
