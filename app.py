@@ -1840,6 +1840,8 @@ def nse_sector_compact_html(frame):
 
 NSE_PERCENT_PERIODS={'1 Day':1,'1 Week':5,'2 Weeks':10,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'2 Years':504,'5 Years':1260}
 
+FAST_PERCENT_PERIODS={'1 Day':1,'2 Days':2,'3 Days':3,'4 Days':4,'1 Week':5,'7 Days':7,**{key:value for key,value in NSE_PERCENT_PERIODS.items() if value>5}}
+
 def nse_percentage_return(record,period):
     closes=(record or {}).get('closes',[]);sessions=NSE_PERCENT_PERIODS[period]
     if len(closes)>sessions:return nse_sector_return(record,sessions)
@@ -2161,7 +2163,7 @@ def fast_percentage_rebuild(store):
         row={'Symbol':symbol,'Stock Name':meta.get('company',symbol),'Sector / Business':meta.get('sector','Unclassified'),
              'Price Date':record.get('last_date',''),'Nifty Membership':meta.get('membership','Unavailable'),
              'Market Cap (₹ Cr)':meta.get('cap',np.nan),'Screener':nse_screener_url(symbol)}
-        for period in NSE_PERCENT_PERIODS:row['return:'+period]=nse_percentage_return(record,period)
+        for period,sessions in FAST_PERCENT_PERIODS.items():row['return:'+period]=nse_percentage_return(record,period) if period in NSE_PERCENT_PERIODS else nse_sector_return(record,sessions)
         rows.append(row)
     store['frame']=pd.DataFrame(rows);store['version']+=1
 
@@ -2241,7 +2243,7 @@ def fast_percentage_price_pair(latest,change):
 def fast_percentage_trend_svg(record,period):
     import math
     history=(record or {}).get('closes',[])
-    count=NSE_PERCENT_PERIODS[period]
+    count=FAST_PERCENT_PERIODS[period]
     values=[float(v) for _,v in history[-count-1:] if math.isfinite(float(v)) and float(v)>0]
     if len(values)<2:return 'Unavailable'
     days=[str(day) for day,_ in history[-count-1:]][1:]
@@ -2265,6 +2267,10 @@ def fast_percentage_trend_svg(record,period):
         candles+=f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{y(high):.2f}" y2="{y(low):.2f}" stroke="{colour}" stroke-width="0.8"/><rect x="{x-width/2:.2f}" y="{top:.2f}" width="{width:.2f}" height="{height:.2f}" fill="{colour}"/>'
     ticks={
         '1 Day':[(0,'Prev'),(1,'1d')],
+        '2 Days':[(1,'1d'),(2,'2d')],
+        '3 Days':[(1,'1d'),(2,'2d'),(3,'3d')],
+        '4 Days':[(1,'1d'),(2,'2d'),(4,'4d')],
+        '7 Days':[(1,'1d'),(4,'4d'),(7,'7d')],
         '1 Week':[(1,'1d'),(3,'3d'),(5,'5d')],
         '2 Weeks':[(1,'1d'),(5,'5d'),(10,'10d')],
         '1 Month':[(5,'1w'),(10,'2w'),(21,'1m')],
@@ -2315,7 +2321,7 @@ FAST_SETTING_DEFAULTS={'fast_universe':'NIFTY 50','fast_period':'1 Day','fast_di
 
 def fast_restore_settings(store):
     choices={'fast_universe':['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],
-             'fast_period':list(NSE_PERCENT_PERIODS),'fast_direction':['Gainer','Loser'],
+             'fast_period':list(FAST_PERCENT_PERIODS),'fast_direction':['Gainer','Loser'],
              'fast_sort_by':['Percentage Change','Market Cap'],'fast_sort_order':['High → Low','Low → High']}
     with store['lock']:saved=dict(store.get('fast_settings',{}))
     for key,default in FAST_SETTING_DEFAULTS.items():
@@ -2348,7 +2354,7 @@ def render_fast_percentage():
     fast_restore_settings(store)
     controls=st.columns([2,2,1,1])
     group=controls[0].selectbox('Universe',['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],key='fast_universe',on_change=fast_save_settings)
-    period=controls[1].selectbox('Trading period',list(NSE_PERCENT_PERIODS),key='fast_period',on_change=fast_save_settings)
+    period=controls[1].selectbox('Trading period',list(FAST_PERCENT_PERIODS),key='fast_period',on_change=fast_save_settings)
     direction=controls[2].selectbox('Show',['Gainer','Loser'],key='fast_direction',on_change=fast_save_settings)
     threshold=controls[3].number_input('Minimum move %',min_value=0.0,step=5.0,key='fast_threshold',on_change=fast_save_settings)
     extra=st.columns(4)
