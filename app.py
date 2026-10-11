@@ -555,7 +555,7 @@ def broker_calls_from_news(broker, symbols, limit=20):
 def fundamentals_for_stock(sym):
     try:
         info=yf.Ticker(sym+".NS").info or {}
-        keys=["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets","operatingMargins","grossMargins","ebitdaMargins","debtToEquity","currentRatio","quickRatio","freeCashflow","operatingCashflow","trailingPE","forwardPE","priceToBook","bookValue","trailingEps","forwardEps","dividendYield","beta","profitMargins","marketCap","enterpriseValue","totalRevenue","fullTimeEmployees","longName","sector","industry","longBusinessSummary","website","city","country","companyOfficers","heldPercentInstitutions","heldPercentInsiders"]
+        keys=["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets","operatingMargins","grossMargins","ebitdaMargins","debtToEquity","currentRatio","quickRatio","freeCashflow","operatingCashflow","trailingPE","forwardPE","priceToBook","bookValue","trailingEps","forwardEps","dividendYield","beta","profitMargins","marketCap","sharesOutstanding","enterpriseValue","totalRevenue","fullTimeEmployees","longName","sector","industry","longBusinessSummary","website","city","country","companyOfficers","heldPercentInstitutions","heldPercentInsiders"]
         return {k:info.get(k) for k in keys}
     except Exception:
         return {}
@@ -2152,7 +2152,10 @@ def fast_percentage_merge(old,record,full=False):
     days=sorted(dates)[-1261:]
     candles={str(row[0]):row for row in previous.get('ohlc',[])}
     candles.update({str(row[0]):row for row in (record or {}).get('ohlc',[])})
-    return {'record':{'closes':[[day,dates[day]] for day in days],'ohlc':[candles[day] for day in days if day in candles],'last_date':days[-1] if days else ''},
+    volumes={str(day):value for day,value in previous.get('volumes',[])}
+    volumes.update({str(row[0]):row[3] for row in (record or {}).get('recent',[]) if len(row)>3})
+    volumes.update({str(day):value for day,value in (record or {}).get('volumes',[])})
+    return {'record':{'closes':[[day,dates[day]] for day in days],'ohlc':[candles[day] for day in days if day in candles],'volumes':[[day,volumes[day]] for day in days if day in volumes],'last_date':days[-1] if days else ''},
             'full':bool(full or (old or {}).get('full'))}
 
 
@@ -2206,7 +2209,7 @@ def fast_percentage_update(store,symbols):
     requests_by_start=defaultdict(list)
     for symbol in symbols:
         entry=store['records'].get(symbol,{})
-        if entry.get('full') and entry.get('record',{}).get('last_date') and entry.get('record',{}).get('ohlc'):
+        if entry.get('full') and entry.get('record',{}).get('last_date') and entry.get('record',{}).get('ohlc') and len(entry['record'].get('volumes',[]))>=len(entry['record'].get('closes',[])):
             start=(pd.Timestamp(entry['record']['last_date'])-pd.Timedelta(days=7)).date().isoformat()
         else:start=None
         requests_by_start[start].append(symbol)
@@ -2224,6 +2227,11 @@ def fast_percentage_update(store,symbols):
                     if frame.empty or 'Close' not in frame:continue
                     record=market_cache_merge(None,frame,today)
                     if record:
+                        record['volumes']=[]
+                        if 'Volume' in frame:
+                            for stamp,value in frame['Volume'].items():
+                                if pd.notna(value) and np.isfinite(float(value)) and float(value)>=0:
+                                    record['volumes'].append([pd.Timestamp(stamp).date().isoformat(),int(value)])
                         record['ohlc']=[]
                         if all(column in frame for column in ['Open','High','Low','Close']):
                             for stamp,row in frame.iterrows():
@@ -2309,9 +2317,33 @@ def fast_percentage_centered_table(frame):
     display['Screener']=[
         '<a href="'+html.escape(str(url),quote=True)+'" target="_blank" rel="noopener noreferrer">Screener ↗</a>' for url in frame['Screener']]
     if 'Trend' in frame:display['Trend']=frame['Trend']
-    styled=nse_percentage_style(display).hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
+    styled=nse_percentage_style(display)
+    count_columns=[column for column in ['Total Shares','Period Traded Volume'] if column in display]
+    if count_columns:styled=styled.format({column:'{:,.0f}' for column in count_columns},na_rep='—')
+    styled=styled.hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
     styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
     st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:3px 5px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred svg{display:block;margin:auto}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
+
+
+def fast_share_count(value):
+    try:
+        number=float(value)
+        return int(number) if np.isfinite(number) and number>0 else np.nan
+    except (TypeError,ValueError):return np.nan
+
+
+def fast_period_volume(record,period):
+    record=record or {}
+    count=FAST_PERCENT_PERIODS[period]
+    closes=record.get('closes',[])
+    if len(closes)<count:return np.nan
+    days=[str(day) for day,_ in closes[-count:]]
+    volumes={str(day):value for day,value in record.get('volumes',[])}
+    try:
+        values=[float(volumes[day]) for day in days]
+        if any(not np.isfinite(value) or value<0 for value in values):return np.nan
+        return int(sum(values))
+    except (KeyError,TypeError,ValueError):return np.nan
 
 
 def fast_percentage_filter_sort(frame,min_cap=None,max_cap=None,sort_by='Percentage Change',sort_order='High → Low'):
@@ -2385,7 +2417,7 @@ def render_fast_percentage():
     buttons=st.columns(3)
     import_existing=buttons[0].button('Use already loaded prices',key='fast_import')
     update=buttons[1].button('Update prices',type='primary',key='fast_update')
-    details=buttons[2].button('Update Nifty labels / market caps',key='fast_details')
+    details=buttons[2].button('Update labels / cap / total shares',key='fast_details')
     with store['lock']:
         if import_existing:
             with loading_stopwatch('Copying existing prices into Fast…'):fast_percentage_import(store)
@@ -2419,7 +2451,9 @@ def render_fast_percentage():
                 for symbol in result.Symbol:
                     meta=store['meta'].setdefault(symbol,{})
                     meta['membership']=nse_membership_label(symbol,memberships)
-                    meta['cap']=nse_market_cap_crore(fundamentals_for_stock(symbol))
+                    info=fundamentals_for_stock(symbol)
+                    meta['cap']=nse_market_cap_crore(info)
+                    meta['shares']=fast_share_count(info.get('sharesOutstanding'))
                 fast_percentage_save(store,[]);fast_percentage_rebuild(store)
                 caps={symbol:store['meta'][symbol] for symbol in result.Symbol}
                 result['Nifty Membership']=[caps[s].get('membership','Unavailable') for s in result.Symbol]
@@ -2435,7 +2469,10 @@ def render_fast_percentage():
     result['Date']=pd.to_datetime(result['Price Date'],errors='coerce').dt.strftime('%d/%m/%Y').fillna('Unavailable')
     st.caption('Price: starting close for your selected period → latest saved close.')
     result['Trend']=[fast_percentage_trend_svg(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
-    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener','Trend']].copy()
+    result['Total Shares']=[store['meta'].get(symbol,{}).get('shares',np.nan) for symbol in result.Symbol]
+    result['Period Traded Volume']=[fast_period_volume(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
+    st.caption('Total Shares = latest available outstanding shares. Period Traded Volume = summed daily volume for the selected sessions, not unique shares. Missing data shows —. Update prices for volume; Update labels / cap / total shares for share counts.')
+    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Total Shares','Period Traded Volume','Nifty Membership','Screener','Trend']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
     st.caption('Candles: green = close ≥ open, red = close < open. Long periods combine sessions into up to 22 OHLC candles. Bottom labels: d = sessions, w = 5, m = 21, y = 252. Click Update prices once to add candles to an older saved dataset.')
     fast_percentage_centered_table(result)
