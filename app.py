@@ -2230,6 +2230,17 @@ def fast_percentage_price_pair(latest,change):
     except (TypeError,ValueError):return 'Unavailable'
 
 
+def fast_percentage_centered_table(frame):
+    display=frame.copy()
+    for column in display.select_dtypes(include=['object','string']).columns:
+        display[column]=display[column].map(lambda value:html.escape(str(value)) if pd.notna(value) else '—')
+    display['Screener']=[
+        '<a href="'+html.escape(str(url),quote=True)+'" target="_blank" rel="noopener noreferrer">View on Screener</a>' for url in frame['Screener']]
+    styled=nse_percentage_style(display).hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
+    styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
+    st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:10px 8px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
+
+
 def render_fast_percentage():
     st.markdown('## ⚡ Fast — By Percentage')
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
@@ -2290,7 +2301,7 @@ def render_fast_percentage():
     st.caption('Price: starting close for your selected period → latest saved close.')
     result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
-    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Price':st.column_config.TextColumn('Price',help='Starting close for the selected return period → latest saved close'),'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
+    fast_percentage_centered_table(result)
     st.download_button('Download Fast results',result.to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
 
