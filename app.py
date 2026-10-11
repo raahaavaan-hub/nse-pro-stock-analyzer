@@ -2230,12 +2230,27 @@ def fast_percentage_price_pair(latest,change):
     except (TypeError,ValueError):return 'Unavailable'
 
 
+def fast_percentage_trend_svg(record,period):
+    import math
+    history=(record or {}).get('closes',[])
+    count=NSE_PERCENT_PERIODS[period]
+    values=[float(v) for _,v in history[-count-1:] if math.isfinite(float(v)) and float(v)>0]
+    if len(values)<2:return 'Unavailable'
+    colour='#16a34a' if values[-1]>values[0] else '#dc2626' if values[-1]<values[0] else '#64748b'
+    minimum=min(values);maximum=max(values);span=maximum-minimum
+    indices=sorted(set([0,len(values)-1]+[round(i*(len(values)-1)/119) for i in range(min(120,len(values)))])) if len(values)>120 else list(range(len(values)))
+    points=' '.join(f'{4+112*i/(len(values)-1):.2f},{36-30*(values[i]-minimum)/span if span else 21:.2f}' for i in indices)
+    title=html.escape(f'{period}: ₹{values[0]:,.2f} → ₹{values[-1]:,.2f}. Saved closing prices; green/red shows net period change.')
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="120" height="42" viewBox="0 0 120 42" role="img" aria-label="{title}"><title>{title}</title><polyline points="{points}" fill="none" stroke="{colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>'
+
+
 def fast_percentage_centered_table(frame):
     display=frame.copy()
     for column in display.select_dtypes(include=['object','string']).columns:
         display[column]=display[column].map(lambda value:html.escape(str(value)) if pd.notna(value) else '—')
     display['Screener']=[
         '<a href="'+html.escape(str(url),quote=True)+'" target="_blank" rel="noopener noreferrer">View on Screener</a>' for url in frame['Screener']]
+    if 'Trend' in frame:display['Trend']=frame['Trend']
     styled=nse_percentage_style(display).hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
     styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
     st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:10px 8px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
@@ -2299,10 +2314,12 @@ def render_fast_percentage():
     result['Price']=[fast_percentage_price_pair(latest.get(symbol),change) for symbol,change in zip(result.Symbol,result['Change %'])]
     result['Date']=pd.to_datetime(result['Price Date'],errors='coerce').dt.strftime('%d/%m/%Y').fillna('Unavailable')
     st.caption('Price: starting close for your selected period → latest saved close.')
-    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener']].copy()
+    result['Trend']=[fast_percentage_trend_svg(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
+    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener','Trend']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
+    st.caption('Trend uses saved closes for the selected period: green = net increase, red = net decrease, grey = unchanged. Long periods are sampled for compact display.')
     fast_percentage_centered_table(result)
-    st.download_button('Download Fast results',result.to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
+    st.download_button('Download Fast results',result.drop(columns=['Trend']).to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
 
 def render_nse_sector_view(group):
