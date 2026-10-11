@@ -2168,6 +2168,16 @@ def fast_percentage_rebuild(store):
     store['frame']=pd.DataFrame(rows);store['version']+=1
 
 
+def fast_percentage_ensure_periods(store):
+    # Streamlit can retain an existing resource after a code deployment.
+    # Upgrade its derived columns from saved records, without a price request.
+    with store['lock']:
+        frame=store.get('frame',pd.DataFrame())
+        required={'return:'+period for period in FAST_PERCENT_PERIODS}
+        if store.get('records') and not required.issubset(frame.columns):
+            fast_percentage_rebuild(store)
+
+
 def fast_percentage_save(store,symbols):
     import sqlite3
     with sqlite3.connect(store['path'],timeout=30) as db:
@@ -2352,6 +2362,7 @@ def render_fast_percentage():
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
     store=fast_percentage_store()
     fast_restore_settings(store)
+    fast_percentage_ensure_periods(store)
     controls=st.columns([2,2,1,1])
     group=controls[0].selectbox('Universe',['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],key='fast_universe',on_change=fast_save_settings)
     period=controls[1].selectbox('Trading period',list(FAST_PERCENT_PERIODS),key='fast_period',on_change=fast_save_settings)
