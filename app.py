@@ -1874,7 +1874,7 @@ def nse_percentage_style(frame):
         return styles
     formats={'Change %':'{:+.2f}%'}
     for col in ['Market Cap (₹ Cr)','P/E','P/B']:
-        if col in frame:formats[col]='{:,.2f}'
+        if col in frame:formats[col]='{:,.0f}' if col=='Market Cap (₹ Cr)' else '{:,.2f}'
     for col in ['Promoter %','FII %','DII %']:
         if col in frame:formats[col]='{:.2f}%'
     return frame.style.apply(colour_row,axis=1).format(formats,na_rep='—')
@@ -2037,6 +2037,45 @@ def nse_screener_url(symbol):
     return 'https://www.screener.in/company/'+quote(str(symbol).removesuffix('.NS'),safe='')+'/'
 
 
+def nse_membership_label(symbol,memberships):
+    labels=[label for label in ['N50','N100','N500'] if memberships.get(label) is not None and symbol in memberships[label]]
+    missing=any(memberships.get(label) is None for label in ['N50','N100','N500'])
+    if labels:return ' · '.join(labels)+(' · Other index data unavailable' if missing else '')
+    return 'Unavailable' if missing else 'Outside Nifty 500'
+
+
+def nse_market_cap_crore(info):
+    try:
+        value=float((info or {}).get('marketCap'))
+        return value/10000000 if np.isfinite(value) and value>0 else np.nan
+    except (TypeError,ValueError):return np.nan
+
+
+def nse_percentage_membership_cap(frame):
+    from concurrent.futures import ThreadPoolExecutor,as_completed
+    memberships={}
+    for label,index in [('N50','NIFTY 50'),('N100','NIFTY 100'),('N500','NIFTY 500')]:
+        try:memberships[label]=set(nse_sector_constituents(index).Symbol.tolist())
+        except Exception:memberships[label]=None
+    frame['Nifty Membership']=[nse_membership_label(symbol,memberships) for symbol in frame.Symbol]
+    cache=st.session_state.setdefault('nse_percentage_market_caps',{})
+    todo=[symbol for symbol in frame.Symbol if symbol not in cache or time.time()-cache[symbol]['saved_at']>=21600]
+    if todo:
+        with loading_stopwatch('Loading market caps for filtered stocks…'):
+            progress=st.progress(0.0)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures={executor.submit(fundamentals_for_stock,symbol):symbol for symbol in todo}
+                for i,future in enumerate(as_completed(futures)):
+                    try:value=nse_market_cap_crore(future.result())
+                    except Exception:value=np.nan
+                    cache[futures[future]]={'value':value,'saved_at':time.time()}
+                    progress.progress((i+1)/len(todo))
+            progress.empty()
+    frame['Market Cap (₹ Cr)']=[cache.get(symbol,{}).get('value',np.nan) for symbol in frame.Symbol]
+    st.caption('Nifty memberships use current official index lists. Market cap is the latest available Yahoo Finance value in ₹ crore, rounded for display; it is not historical market cap for the selected period. — means unavailable. Cached for 6 hours; only matching stocks are fetched.')
+    return frame
+
+
 def render_nse_percentage_view(group,default_symbols):
     st.markdown('#### 📊 By Percentage')
     controls=st.columns([2,1,1])
@@ -2077,11 +2116,11 @@ def render_nse_percentage_view(group,default_symbols):
     if st.session_state.get('classic_load_notice'):st.warning(st.session_state['classic_load_notice'])
     if available==0:st.info('Click Load / Update percentage data. Changing the threshold or Gainer/Loser uses saved prices without downloading again.');return
     if result.empty:st.info(f'No stocks match {direction.lower()} ≥ {threshold:g}% for {period} in the available data.');return
-    result=result.copy()
+    result=nse_percentage_membership_cap(result.copy())
     result['Screener']=[nse_screener_url(symbol) for symbol in result.Symbol]
     result.insert(0,'No.',range(1,len(result)+1))
     st.caption('🟢 Gains · 🔴 Falls · Coloured sector cells identify groups. Click View on Screener to open the stock’s details in a new tab.')
-    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
+    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
     st.download_button('Download matching stocks',result.to_csv(index=False),'nse_percentage_matches.csv','text/csv',key='nse_pct_csv')
 
 
