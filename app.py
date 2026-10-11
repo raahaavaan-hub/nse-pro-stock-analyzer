@@ -2368,6 +2368,79 @@ def render_fast_percentage():
     st.download_button('Download Fast results',result.drop(columns=['Trend']).to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
 
+@st.cache_data(ttl=900,show_spinner=False)
+def independent_stock_chart_data(symbol,mode,selected_date,period):
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    intraday=mode=='Date' or period=='1 Day'
+    if intraday:
+        start=date.fromisoformat(selected_date) if mode=='Date' else today
+        # Sundays/holidays stay empty in Date mode; never substitute another day.
+        if mode=='Period':
+            options={'period':'5d','interval':'5m'}
+        else:
+            options={'start':start.isoformat(),'end':(start+timedelta(days=1)).isoformat(),'interval':'5m'}
+    else:
+        offsets={'1 Week':pd.DateOffset(weeks=1),'1 Month':pd.DateOffset(months=1),
+                 '3 Months':pd.DateOffset(months=3),'6 Months':pd.DateOffset(months=6),
+                 '1 Year':pd.DateOffset(years=1),'2 Years':pd.DateOffset(years=2),'5 Years':pd.DateOffset(years=5)}
+        start=(pd.Timestamp(today)-offsets[period]).date()
+        options={'start':start.isoformat(),'end':(today+timedelta(days=1)).isoformat(),'interval':'1d'}
+    frame,limited=limited_price_download([symbol+'.NS'],auto_adjust=False,progress=False,**options)
+    if limited:raise PriceRateLimited('Price provider limited requests. Please try later.')
+    if frame.empty:return frame
+    if isinstance(frame.columns,pd.MultiIndex):frame.columns=frame.columns.get_level_values(0)
+    frame=frame.dropna(subset=['Close']).copy()
+    index=pd.DatetimeIndex(frame.index)
+    if intraday:
+        index=index.tz_localize('Asia/Kolkata') if index.tz is None else index.tz_convert('Asia/Kolkata')
+        frame.index=index
+        target=date.fromisoformat(selected_date) if mode=='Date' else index[-1].date()
+        frame=frame[index.date==target]
+    return frame
+
+
+def render_independent_stock_charts():
+    st.markdown('## 📈 Charts')
+    st.caption('Two independent views: one selected date, or a recent period ending at the latest available trading day.')
+    saved=fast_percentage_store()
+    symbols=sorted(set(saved['records'])|set(FALLBACK))
+    if st.button('Load full NSE stock list',key='chart_load_symbols'):
+        st.session_state['chart_symbols']=universe()
+    symbols=sorted(set(symbols)|set(st.session_state.get('chart_symbols',[])))
+    with st.form('independent_chart_form'):
+        stock=st.selectbox('Stock — type to search',symbols,key='chart_stock')
+        custom=st.text_input('Or enter another NSE symbol',placeholder='Example: AUGMONT',key='chart_custom_symbol')
+        mode=st.radio('Graph option',['Date','Period'],horizontal=True,key='chart_mode')
+        cols=st.columns(2)
+        chosen=cols[0].date_input('Date — used only in Date mode',value=datetime.now(ZoneInfo('Asia/Kolkata')).date(),format='DD/MM/YYYY',key='chart_date')
+        period=cols[1].selectbox('Period — used only in Period mode',['1 Day','1 Week','1 Month','3 Months','6 Months','1 Year','2 Years','5 Years'],key='chart_range')
+        submit=st.form_submit_button('Show graph',type='primary')
+    if submit:
+        symbol=(custom.strip() or stock).upper().removesuffix('.NS')
+        if not re.fullmatch(r'[A-Z0-9&._-]+',symbol):st.error('Enter a valid NSE symbol.');return
+        if mode=='Date' and chosen>datetime.now(ZoneInfo('Asia/Kolkata')).date():
+            st.warning('Future dates have no trading data.');return
+        try:
+            with loading_stopwatch('Loading selected stock graph…'):
+                frame=independent_stock_chart_data(symbol,mode,chosen.isoformat(),period)
+            st.session_state['independent_chart_result']=(symbol,mode,chosen.isoformat(),period,frame)
+        except Exception as exc:
+            st.session_state.pop('independent_chart_result',None)
+            st.error('Graph unavailable: '+str(exc));return
+    result=st.session_state.get('independent_chart_result')
+    if result is None:return
+    symbol,mode,chosen,period,frame=result
+    title=symbol+' · '+(date.fromisoformat(chosen).strftime('%d/%m/%Y') if mode=='Date' else period)
+    st.markdown('#### '+html.escape(title))
+    if frame.empty:
+        st.info('No prices available for this selection. A selected date may be a holiday, or its intraday history may be unavailable from the provider. Another day is not substituted.');return
+    colour='#16a34a' if float(frame.Close.iloc[-1])>=float(frame.Close.iloc[0]) else '#dc2626'
+    fig=go.Figure(go.Scatter(x=frame.index,y=frame.Close,mode='lines',line=dict(color=colour,width=2),name='Price',hovertemplate='%{x}<br>₹%{y:,.2f}<extra></extra>'))
+    fig.update_layout(height=320,margin=dict(l=10,r=10,t=10,b=10),xaxis_title='Time (IST)' if mode=='Date' or period=='1 Day' else 'Date',yaxis_title='Price (₹)',showlegend=False)
+    st.plotly_chart(fig,use_container_width=True)
+    st.caption('Displayed data: '+frame.index[0].strftime('%d/%m/%Y')+' to '+frame.index[-1].strftime('%d/%m/%Y')+'. Date / 1 Day charts use 5-minute prices when available; longer periods use daily closes. Prices are cached for 15 minutes.')
+
+
 def render_nse_sector_view(group):
     st.markdown('#### 🧩 Sector-wise Stocks')
     periods={'1 Day':1,'5 Days':5,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'5 Years':1260}
@@ -2439,7 +2512,7 @@ st.markdown("""<style>
 </style>""",unsafe_allow_html=True)
 
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","📈 Charts","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
@@ -3248,6 +3321,9 @@ elif page=="🎯 Brokerage Calls":
         st.download_button("⬇️ Download Brokerage Calls CSV",df.to_csv(index=False).encode(),"brokerage_calls.csv","text/csv")
         st.info("Target and symbol are parsed only when clearly present in public news text. Blank means not confidently detected.")
 
+
+elif page=="📈 Charts":
+    render_independent_stock_charts()
 
 elif page=="⚡ Fast":
     render_fast_percentage()
