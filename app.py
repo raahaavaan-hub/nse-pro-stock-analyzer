@@ -2341,6 +2341,50 @@ def fast_share_count(value):
     except (TypeError,ValueError):return np.nan
 
 
+def fast_fetch_share_count(symbol):
+    # Explicit refresh only: avoid caching failed lookups for six hours.
+    ticker=yf.Ticker(symbol+'.NS')
+    checked=datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    try:
+        series=ticker.get_shares_full(start=(pd.Timestamp(checked)-pd.DateOffset(months=18)).date().isoformat())
+        if series is not None and not series.empty:
+            series=series.dropna().sort_index()
+            if not series.empty:
+                count=fast_share_count(series.iloc[-1])
+                if pd.notna(count):return {'shares':count,'shares_source':'Yahoo shares history','shares_asof':pd.Timestamp(series.index[-1]).date().isoformat(),'shares_checked':checked}
+    except Exception:pass
+    try:
+        count=fast_share_count(ticker.fast_info['shares'])
+        if pd.notna(count):return {'shares':count,'shares_source':'Yahoo fast info','shares_asof':'','shares_checked':checked}
+    except Exception:pass
+    try:
+        info=ticker.info or {}
+        count=fast_share_count(info.get('sharesOutstanding'))
+        if pd.notna(count):return {'shares':count,'shares_source':'Yahoo company info','shares_asof':'','shares_checked':checked}
+    except Exception:pass
+    return {'shares':np.nan,'shares_source':'Unavailable','shares_asof':'','shares_checked':checked}
+
+
+def fast_refresh_share_counts(store,symbols):
+    symbols=list(dict.fromkeys(symbols));missing=0
+    progress=st.progress(0.0);status=st.empty()
+    try:
+        for position,symbol in enumerate(symbols):
+            data=fast_fetch_share_count(symbol)
+            meta=store['meta'].setdefault(symbol,{})
+            if pd.notna(data['shares']):meta.update(data)
+            else:
+                meta['shares_last_attempt']=data['shares_checked']
+                if pd.isna(meta.get('shares',np.nan)):missing+=1
+            # Save each result immediately so an interrupted update keeps progress.
+            fast_percentage_save(store,[])
+            progress.progress((position+1)/max(len(symbols),1))
+            status.caption(f'Share counts checked: {position+1:,}/{len(symbols):,}')
+    finally:progress.empty();status.empty()
+    if missing:st.warning(f'{missing:,} share counts remain unavailable. Existing valid values were kept.')
+    else:st.success(f'Share counts saved for {len(symbols):,} stocks.')
+
+
 def fast_period_volume(record,period):
     record=record or {}
     count=FAST_PERCENT_PERIODS[period]
@@ -2423,10 +2467,11 @@ def render_fast_percentage():
             raise ValueError('Minimum market cap must not exceed maximum.')
     except ValueError as exc:
         st.error('Check market-cap limits: '+str(exc));return
-    buttons=st.columns(3)
+    buttons=st.columns(4)
     import_existing=buttons[0].button('Use already loaded prices',key='fast_import')
     update=buttons[1].button('Update prices',type='primary',key='fast_update')
     details=buttons[2].button('Update labels / cap / total shares',key='fast_details')
+    shares_only=buttons[3].button('Retry total shares only',key='fast_shares_only')
     with store['lock']:
         if import_existing:
             with loading_stopwatch('Copying existing prices into Fast…'):fast_percentage_import(store)
@@ -2464,9 +2509,9 @@ def render_fast_percentage():
                     meta=store['meta'].setdefault(symbol,{})
                     meta['membership']=nse_membership_label(symbol,memberships)
                     info=fundamentals_for_stock(symbol)
-                    cap=nse_market_cap_crore(info);shares=fast_share_count(info.get('sharesOutstanding'))
+                    cap=nse_market_cap_crore(info);share_data=fast_fetch_share_count(symbol);shares=share_data['shares']
                     if pd.notna(cap):meta['cap']=cap
-                    if pd.notna(shares):meta['shares']=shares
+                    if pd.notna(shares):meta.update(share_data)
                     elif pd.isna(meta.get('shares',np.nan)):missing_shares+=1
                     progress.progress((position+1)/len(table));status.caption(f'Details updated: {position+1:,}/{len(table):,}')
                 progress.empty();status.empty()
@@ -2475,6 +2520,9 @@ def render_fast_percentage():
                 caps={symbol:store['meta'][symbol] for symbol in result.Symbol}
                 result['Nifty Membership']=[caps[s].get('membership','Unavailable') for s in result.Symbol]
                 result['Market Cap (₹ Cr)']=[caps[s].get('cap',np.nan) for s in result.Symbol]
+        if shares_only:
+            with loading_stopwatch('Retrying total share counts…'):
+                fast_refresh_share_counts(store,table.Symbol)
     result['Nifty Membership']=[fast_membership_display(symbol,store) for symbol in result.Symbol]
     result=fast_percentage_filter_sort(result,min_cap,max_cap,sort_by,sort_order)
     if min_cap is not None or max_cap is not None:
@@ -2489,6 +2537,9 @@ def render_fast_percentage():
     result['Trend']=[fast_percentage_trend_svg(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
     result['Total Shares']=[store['meta'].get(symbol,{}).get('shares',np.nan) for symbol in result.Symbol]
     result['Period Traded Volume']=[fast_period_volume(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
+    with st.expander('Share-count sources and dates'):
+        source_rows=[{'Stock':store['meta'].get(symbol,{}).get('company',symbol),'Source':store['meta'].get(symbol,{}).get('shares_source','Not loaded'),'As of':store['meta'].get(symbol,{}).get('shares_asof') or 'Not provided','Checked':store['meta'].get(symbol,{}).get('shares_checked','Not loaded')} for symbol in result.Symbol]
+        st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
     st.caption('Total Shares = latest available outstanding shares. Period Traded Volume = summed daily volume for the selected sessions, not unique shares. Missing data shows —. Update prices for volume; Update labels / cap / total shares for share counts.')
     result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Total Shares','Period Traded Volume','Nifty Membership','Screener','Trend']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
