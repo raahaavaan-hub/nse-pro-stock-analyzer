@@ -2220,6 +2220,16 @@ def fast_percentage_update(store,symbols):
     return notice
 
 
+def fast_percentage_price_pair(latest,change):
+    try:
+        latest=float(latest);factor=1+float(change)/100
+        if not np.isfinite(latest) or not np.isfinite(factor) or latest<=0 or factor<=0:return 'Unavailable'
+        old=latest/factor
+        number=lambda value:format(value,',.2f').rstrip('0').rstrip('.')
+        return '₹'+number(old)+' → ₹'+number(latest)
+    except (TypeError,ValueError):return 'Unavailable'
+
+
 def render_fast_percentage():
     st.markdown('## ⚡ Fast — By Percentage')
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
@@ -2275,11 +2285,12 @@ def render_fast_percentage():
     st.caption('First build downloads up to 5 years. Later updates merge recent dates with a 7-day overlap, without downloading the whole history. Older gaps are not automatically audited. Local cache survives browser sessions but hosting resets may erase it; Google Sheet backup is not connected in this trial.')
     if result.empty:st.info('No saved stocks match this filter.');return
     latest={symbol:entry['record']['closes'][-1][1] for symbol,entry in store['records'].items() if entry['record'].get('closes')}
-    result['Latest Price (₹)']=result.Symbol.map(latest)
+    result['Price']=[fast_percentage_price_pair(latest.get(symbol),change) for symbol,change in zip(result.Symbol,result['Change %'])]
     result['Date']=pd.to_datetime(result['Price Date'],errors='coerce').dt.strftime('%d/%m/%Y').fillna('Unavailable')
-    result=result[['Stock Name','Date','Change %','Latest Price (₹)','Market Cap (₹ Cr)','Nifty Membership','Screener']].copy()
+    st.caption('Price: starting close for your selected period → latest saved close.')
+    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Nifty Membership','Screener']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
-    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Latest Price (₹)':st.column_config.NumberColumn(format='%.2f'),'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
+    st.dataframe(nse_percentage_style(result),use_container_width=True,hide_index=True,height=min(650,38+len(result)*35),column_config={'Price':st.column_config.TextColumn('Price',help='Starting close for the selected return period → latest saved close'),'Market Cap (₹ Cr)':st.column_config.NumberColumn(format='%.0f'),'Screener':st.column_config.LinkColumn('Screener',display_text='View on Screener')})
     st.download_button('Download Fast results',result.to_csv(index=False),'fast_percentage.csv','text/csv',key='fast_csv')
 
 
