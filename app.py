@@ -2385,6 +2385,86 @@ def fast_refresh_share_counts(store,symbols):
     else:st.success(f'Share counts saved for {len(symbols):,} stocks.')
 
 
+def fast_parse_holdings(document):
+    from html.parser import HTMLParser
+    class TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__();self.rows=[];self.row=None;self.cell=None
+        def handle_starttag(self,tag,attrs):
+            if tag=='tr':self.row=[]
+            if tag in ['td','th'] and self.row is not None:self.cell=[]
+        def handle_data(self,data):
+            if self.cell is not None:self.cell.append(data)
+        def handle_endtag(self,tag):
+            if tag in ['td','th'] and self.cell is not None:
+                self.row.append(' '.join(''.join(self.cell).split()));self.cell=None
+            if tag=='tr' and self.row is not None:self.rows.append(self.row);self.row=None
+    section=re.search(r'<section\b[^>]*id=["\']shareholding["\'][^>]*>(.*?)</section>',document,re.S|re.I)
+    if not section:return None
+    tables=re.findall(r'<table\b[^>]*>.*?</table>',section.group(1),re.S|re.I)
+    candidates=[]
+    for table in tables:
+        parser=TableParser();parser.feed(table)
+        if not parser.rows:continue
+        header=parser.rows[0]
+        dated=[]
+        for index,label in enumerate(header):
+            try:dated.append((datetime.strptime(label.strip(),'%b %Y'),index,label))
+            except ValueError:pass
+        if not dated:continue
+        stamp,column,label=max(dated)
+        values={}
+        for row in parser.rows[1:]:
+            if len(row)<=column:continue
+            name=row[0].replace('+','').strip().lower()
+            key={'promoters':'promoter','fiis':'fii','diis':'dii'}.get(name)
+            if key:
+                try:
+                    value=float(row[column].replace('%','').replace(',','').strip())
+                    if np.isfinite(value) and 0<=value<=100:values[key]=value
+                except ValueError:pass
+        if values:
+            total=sum(values.values())
+            if len(values)==3 and total<=100.05:values['others']=max(0,100-total)
+            values.update(asof=label,source='Screener shareholding report')
+            candidates.append((stamp,values))
+    return max(candidates,key=lambda item:item[0])[1] if candidates else None
+
+
+def fast_fetch_holdings(symbol):
+    from urllib.parse import quote
+    for suffix in ['consolidated/','']:
+        try:
+            url='https://www.screener.in/company/'+quote(symbol,safe='')+'/'+suffix
+            response=requests.get(url,headers=HEADERS,timeout=(5,15))
+            response.raise_for_status()
+            data=fast_parse_holdings(response.text)
+            if data:return data
+        except Exception:pass
+    return None
+
+
+def fast_holdings_display(data):
+    data=data or {}
+    return ' · '.join(format(float(data[key]),'.2f').rstrip('0').rstrip('.') if key in data else '—' for key in ['promoter','fii','dii','others'])
+
+
+def fast_refresh_holdings(store,symbols):
+    symbols=list(dict.fromkeys(symbols));missing=0
+    progress=st.progress(0.0);status=st.empty()
+    try:
+        for position,symbol in enumerate(symbols):
+            data=fast_fetch_holdings(symbol)
+            if data:
+                store['meta'].setdefault(symbol,{})['holdings']=data
+                fast_percentage_save(store,[])
+            else:missing+=1
+            progress.progress((position+1)/max(len(symbols),1))
+            status.caption(f'Shareholding reports checked: {position+1:,}/{len(symbols):,}')
+    finally:progress.empty();status.empty()
+    if missing:st.warning(f'{missing:,} reports could not be loaded. Saved reports were retained; missing figures show —.')
+
+
 def fast_period_volume(record,period):
     record=record or {}
     count=FAST_PERCENT_PERIODS[period]
@@ -2472,6 +2552,7 @@ def render_fast_percentage():
     update=buttons[1].button('Update prices',type='primary',key='fast_update')
     details=buttons[2].button('Update labels / cap / total shares',key='fast_details')
     shares_only=buttons[3].button('Retry total shares only',key='fast_shares_only')
+    holdings_update=st.button('Update promoter / FII / DII holdings',key='fast_holdings_update')
     with store['lock']:
         if import_existing:
             with loading_stopwatch('Copying existing prices into Fast…'):fast_percentage_import(store)
@@ -2520,6 +2601,9 @@ def render_fast_percentage():
                 caps={symbol:store['meta'][symbol] for symbol in result.Symbol}
                 result['Nifty Membership']=[caps[s].get('membership','Unavailable') for s in result.Symbol]
                 result['Market Cap (₹ Cr)']=[caps[s].get('cap',np.nan) for s in result.Symbol]
+        if holdings_update:
+            with loading_stopwatch('Updating shareholding reports for matching stocks…'):
+                fast_refresh_holdings(store,result.Symbol)
         if shares_only:
             with loading_stopwatch('Retrying total share counts…'):
                 fast_refresh_share_counts(store,table.Symbol)
@@ -2536,12 +2620,16 @@ def render_fast_percentage():
     st.caption('Price: starting close for your selected period → latest saved close.')
     result['Trend']=[fast_percentage_trend_svg(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
     result['Total Shares']=[store['meta'].get(symbol,{}).get('shares',np.nan) for symbol in result.Symbol]
+    result['Promoter · FII · DII · Others (%)']=[fast_holdings_display(store['meta'].get(symbol,{}).get('holdings')) for symbol in result.Symbol]
+    with st.expander('Shareholding report dates'):
+        st.dataframe(pd.DataFrame([{'Stock':symbol,'Report':store['meta'].get(symbol,{}).get('holdings',{}).get('asof','Not loaded'),'Source':store['meta'].get(symbol,{}).get('holdings',{}).get('source','Not loaded')} for symbol in result.Symbol]),hide_index=True,use_container_width=True)
+    st.caption('Holdings order: Promoter · FII · DII · Others (%). Others = 100 minus the three reported categories; includes public and other holders. These are the latest loaded report figures, independent of the price period.')
     result['Period Traded Volume']=[fast_period_volume(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
     with st.expander('Share-count sources and dates'):
         source_rows=[{'Stock':store['meta'].get(symbol,{}).get('company',symbol),'Source':store['meta'].get(symbol,{}).get('shares_source','Not loaded'),'As of':store['meta'].get(symbol,{}).get('shares_asof') or 'Not provided','Checked':store['meta'].get(symbol,{}).get('shares_checked','Not loaded')} for symbol in result.Symbol]
         st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
     st.caption('Total Shares = latest available outstanding shares. Period Traded Volume = summed daily volume for the selected sessions, not unique shares. Missing data shows —. Update prices for volume; Update labels / cap / total shares for share counts.')
-    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Total Shares','Period Traded Volume','Nifty Membership','Screener','Trend']].copy()
+    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Total Shares','Period Traded Volume','Promoter · FII · DII · Others (%)','Nifty Membership','Screener','Trend']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
     st.caption('Candles: green = close ≥ open, red = close < open. Long periods combine sessions into up to 22 OHLC candles. Bottom labels: d = sessions, w = 5, m = 21, y = 252. Click Update prices once to add candles to an older saved dataset.')
     fast_percentage_centered_table(result)
