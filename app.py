@@ -2332,9 +2332,10 @@ def fast_percentage_centered_table(frame):
     styled=nse_percentage_style(display)
     count_columns=[column for column in ['Total Shares','Period Traded Volume'] if column in display]
     if count_columns:styled=styled.format({column:fast_indian_share_format for column in count_columns},subset=count_columns,na_rep='—')
+    styled=styled.relabel_index(['M.Cap ₹Cr' if col=='Market Cap (₹ Cr)' else 'Shares' if col=='Total Shares' else 'Volume' if col=='Period Traded Volume' else 'P · F · D · O %' if col=='Promoter · FII · DII · Others (%)' else 'Nifty' if col=='Nifty Membership' else col for col in display.columns],axis='columns')
     styled=styled.hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
     styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
-    st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:3px 5px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred svg{display:block;margin:auto}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
+    st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:3px 5px;border:1px solid #e2e8f0;white-space:normal;overflow-wrap:anywhere;line-height:1.3}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred th:nth-child(1),.fast-centred td:nth-child(1){width:28px}.fast-centred th:nth-child(2),.fast-centred td:nth-child(2){width:110px}.fast-centred th:nth-child(3),.fast-centred td:nth-child(3){width:100px}.fast-centred svg{display:block;margin:auto;max-width:100%}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
 
 
 def fast_membership_display(symbol,store):
@@ -2641,7 +2642,7 @@ def render_fast_percentage():
         source_rows=[{'Stock':store['meta'].get(symbol,{}).get('company',symbol),'Source':store['meta'].get(symbol,{}).get('shares_source','Not loaded'),'As of':store['meta'].get(symbol,{}).get('shares_asof') or 'Not provided','Checked':store['meta'].get(symbol,{}).get('shares_checked','Not loaded')} for symbol in result.Symbol]
         st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
     st.caption('Total Shares = latest available outstanding shares. Period Traded Volume = summed daily volume for the selected sessions, not unique shares. Missing data shows —. Update prices for volume; Update labels / cap / total shares for share counts.')
-    result=result[['Stock Name','Date','Change %','Price','Market Cap (₹ Cr)','Total Shares','Period Traded Volume','Promoter · FII · DII · Others (%)','Nifty Membership','Screener','Trend']].copy()
+    result=result[['Stock Name','Trend','Date','Change %','Price','Market Cap (₹ Cr)','Total Shares','Period Traded Volume','Promoter · FII · DII · Others (%)','Nifty Membership','Screener']].copy()
     result.insert(0,'No.',range(1,len(result)+1))
     st.caption('Candles: green = close ≥ open, red = close < open. Long periods combine sessions into up to 22 OHLC candles. Bottom labels: d = sessions, w = 5, m = 21, y = 252. Click Update prices once to add candles to an older saved dataset.')
     fast_percentage_centered_table(result)
