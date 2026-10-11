@@ -2310,6 +2310,18 @@ def fast_percentage_trend_svg(record,period):
 
 
 
+def fast_indian_share_format(value):
+    try:
+        number=float(value)
+        if not np.isfinite(number):return '—'
+        digits=str(int(round(abs(number))))
+        tail=digits[-3:];head=digits[:-3];groups=[]
+        while head:
+            groups.insert(0,head[-2:]);head=head[:-2]
+        return ('-' if number<0 else '')+(','.join(groups+[tail]) if groups else tail)
+    except (TypeError,ValueError):return '—'
+
+
 def fast_percentage_centered_table(frame):
     display=frame.copy()
     for column in display.select_dtypes(include=['object','string']).columns:
@@ -2319,7 +2331,7 @@ def fast_percentage_centered_table(frame):
     if 'Trend' in frame:display['Trend']=frame['Trend']
     styled=nse_percentage_style(display)
     count_columns=[column for column in ['Total Shares','Period Traded Volume'] if column in display]
-    if count_columns:styled=styled.format({column:'{:,.0f}' for column in count_columns},subset=count_columns,na_rep='—')
+    if count_columns:styled=styled.format({column:fast_indian_share_format for column in count_columns},subset=count_columns,na_rep='—')
     styled=styled.hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
     styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
     st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:3px 5px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred svg{display:block;margin:auto}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
@@ -2446,7 +2458,7 @@ def fast_fetch_holdings(symbol):
 
 def fast_holdings_display(data):
     data=data or {}
-    return ' · '.join(format(float(data[key]),'.2f').rstrip('0').rstrip('.') if key in data else '—' for key in ['promoter','fii','dii','others'])
+    return ' - '.join(prefix+(format(float(data[key]),'.2f').rstrip('0').rstrip('.') if key in data else '—') for prefix,key in [('P','promoter'),('F','fii'),('D','dii'),('O','others')])
 
 
 def fast_refresh_holdings(store,symbols):
@@ -2623,7 +2635,7 @@ def render_fast_percentage():
     result['Promoter · FII · DII · Others (%)']=[fast_holdings_display(store['meta'].get(symbol,{}).get('holdings')) for symbol in result.Symbol]
     with st.expander('Shareholding report dates'):
         st.dataframe(pd.DataFrame([{'Stock':symbol,'Report':store['meta'].get(symbol,{}).get('holdings',{}).get('asof','Not loaded'),'Source':store['meta'].get(symbol,{}).get('holdings',{}).get('source','Not loaded')} for symbol in result.Symbol]),hide_index=True,use_container_width=True)
-    st.caption('Holdings order: Promoter · FII · DII · Others (%). Others = 100 minus the three reported categories; includes public and other holders. These are the latest loaded report figures, independent of the price period.')
+    st.caption('Holdings: P = Promoter, F = FII, D = DII, O = Others (%). Example: P60 - F10 - D10 - O20. Others = 100 minus the three reported categories; includes public and other holders. These are the latest loaded report figures, independent of the price period.')
     result['Period Traded Volume']=[fast_period_volume(store['records'].get(symbol,{}).get('record'),period) for symbol in result.Symbol]
     with st.expander('Share-count sources and dates'):
         source_rows=[{'Stock':store['meta'].get(symbol,{}).get('company',symbol),'Source':store['meta'].get(symbol,{}).get('shares_source','Not loaded'),'As of':store['meta'].get(symbol,{}).get('shares_asof') or 'Not provided','Checked':store['meta'].get(symbol,{}).get('shares_checked','Not loaded')} for symbol in result.Symbol]
