@@ -2319,10 +2319,19 @@ def fast_percentage_centered_table(frame):
     if 'Trend' in frame:display['Trend']=frame['Trend']
     styled=nse_percentage_style(display)
     count_columns=[column for column in ['Total Shares','Period Traded Volume'] if column in display]
-    if count_columns:styled=styled.format({column:'{:,.0f}' for column in count_columns},na_rep='—')
+    if count_columns:styled=styled.format({column:'{:,.0f}' for column in count_columns},subset=count_columns,na_rep='—')
     styled=styled.hide(axis='index').set_properties(**{'text-align':'center','vertical-align':'middle'})
     styled=styled.set_table_styles([{'selector':'th','props':[('text-align','center'),('vertical-align','middle')]}])
     st.markdown('<style>.fast-centred{overflow-x:auto;border-radius:10px}.fast-centred table{width:100%;border-collapse:collapse;font-size:13px}.fast-centred th,.fast-centred td{text-align:center!important;vertical-align:middle!important;padding:3px 5px;border:1px solid #e2e8f0;white-space:nowrap}.fast-centred th{background:#e0e7ff;color:#172033}.fast-centred svg{display:block;margin:auto}.fast-centred a{color:#1d4ed8;text-decoration:none}.fast-centred a:hover{text-decoration:underline}</style><div class="fast-centred">'+styled.to_html()+'</div>',unsafe_allow_html=True)
+
+
+def fast_membership_display(symbol,store):
+    for label,index in [('Nifty 50','NIFTY 50'),('Nifty 100','NIFTY 100'),('Nifty 500','NIFTY 500')]:
+        if symbol in store.get('groups',{}).get(index,[]):return label
+    previous=str(store.get('meta',{}).get(symbol,{}).get('membership','Unavailable'))
+    for code,label in [('N50','Nifty 50'),('N100','Nifty 100'),('N500','Nifty 500')]:
+        if code in previous.split(' · '):return label
+    return previous
 
 
 def fast_share_count(value):
@@ -2443,24 +2452,33 @@ def render_fast_percentage():
         result=result.drop(columns=[c for c in result if c.startswith('return:')])
         result=nse_percentage_filter(result,direction,threshold)
         if details:
-            with loading_stopwatch('Updating labels and market caps for filtered stocks…'):
+            with loading_stopwatch('Updating labels, market caps and shares for the selected universe…'):
                 memberships={}
                 for label,index in [('N50','NIFTY 50'),('N100','NIFTY 100'),('N500','NIFTY 500')]:
-                    try:memberships[label]=set(nse_sector_constituents(index).Symbol)
+                    try:
+                        memberships[label]=set(nse_sector_constituents(index).Symbol)
+                        store['groups'][index]=sorted(memberships[label])
                     except Exception:memberships[label]=None
-                for symbol in result.Symbol:
+                progress=st.progress(0.0);status=st.empty();missing_shares=0
+                for position,symbol in enumerate(table.Symbol):
                     meta=store['meta'].setdefault(symbol,{})
                     meta['membership']=nse_membership_label(symbol,memberships)
                     info=fundamentals_for_stock(symbol)
-                    meta['cap']=nse_market_cap_crore(info)
-                    meta['shares']=fast_share_count(info.get('sharesOutstanding'))
+                    cap=nse_market_cap_crore(info);shares=fast_share_count(info.get('sharesOutstanding'))
+                    if pd.notna(cap):meta['cap']=cap
+                    if pd.notna(shares):meta['shares']=shares
+                    elif pd.isna(meta.get('shares',np.nan)):missing_shares+=1
+                    progress.progress((position+1)/len(table));status.caption(f'Details updated: {position+1:,}/{len(table):,}')
+                progress.empty();status.empty()
+                if missing_shares:st.warning(f'Total shares unavailable from the provider for {missing_shares:,} stocks. Saved valid values are retained.')
                 fast_percentage_save(store,[]);fast_percentage_rebuild(store)
                 caps={symbol:store['meta'][symbol] for symbol in result.Symbol}
                 result['Nifty Membership']=[caps[s].get('membership','Unavailable') for s in result.Symbol]
                 result['Market Cap (₹ Cr)']=[caps[s].get('cap',np.nan) for s in result.Symbol]
+    result['Nifty Membership']=[fast_membership_display(symbol,store) for symbol in result.Symbol]
     result=fast_percentage_filter_sort(result,min_cap,max_cap,sort_by,sort_order)
     if min_cap is not None or max_cap is not None:
-        st.caption('Market-cap limits use saved values in ₹ crore. Stocks without a saved cap are excluded. Use Update Nifty labels / market caps to fill them.')
+        st.caption('Market-cap limits use saved values in ₹ crore. Stocks without a saved cap are excluded. Use Update labels / cap / total shares to fill them.')
     st.caption(f'{table["Change %"].notna().sum() if "Change %" in table else table["return:"+period].notna().sum():,}/{len(table):,} stocks have sufficient history · {len(result):,} match. Price dates shown per stock; saved data may be old until updated.')
     st.caption('First build downloads up to 5 years. Later updates merge recent dates with a 7-day overlap, without downloading the whole history. Older gaps are not automatically audited. Local cache survives browser sessions but hosting resets may erase it; Google Sheet backup is not connected in this trial.')
     if result.empty:st.info('No saved stocks match this filter.');return
