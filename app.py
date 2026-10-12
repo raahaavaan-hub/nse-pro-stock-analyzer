@@ -3294,21 +3294,6 @@ def render_market_dashboard():
     selected=nav[1].date_input('Market date',format='DD/MM/YYYY',max_value=today,key='dashboard_date')
     nav[2].button('›',key='dashboard_next',on_click=dashboard_move_date,args=(1,),disabled=selected>=today)
     nav[3].button('Today',key='dashboard_today',on_click=lambda:st.session_state.update(dashboard_date=today))
-    with st.expander('Edit names / symbols · Add or delete cards'):
-        st.caption('Rename changes the label only. Use Yahoo symbols: ^NSEI, ^IXIC, 000001.SS, ^KS11, INR=X. For crypto, use CoinGecko IDs: CG:BELDEX, CG:BITCOIN, CG:ETHEREUM with Crypto INR. Gold/Silver conversion modes require USD-per-troy-ounce instruments; Points remain index points.')
-        edited=st.data_editor(pd.DataFrame(state['cards'],columns=['Name','Symbol','Display']),num_rows='dynamic',hide_index=True,use_container_width=True,key='dashboard_card_editor',column_config={'Display':st.column_config.SelectboxColumn('Display',options=['Points','INR','Gold ₹/gram','Silver ₹/kg','Crypto INR'],required=True)})
-        if st.button('Save dashboard cards',key='dashboard_save_cards'):
-            cards=[];errors=[]
-            for _,row in edited.iterrows():
-                if pd.isna(row.Name) or pd.isna(row.Symbol):errors.append('Each card needs a name and symbol.');continue
-                name=str(row.Name).strip();symbol=str(row.Symbol).strip().upper();mode=row.Display
-                if (mode=='Crypto INR' and not symbol.startswith('CG:')) or not name or not re.fullmatch(r'[A-Z0-9^=:.&_\-]{1,40}',symbol) or mode not in ['Points','INR','Gold ₹/gram','Silver ₹/kg','Crypto INR']:
-                    errors.append('Check card names, symbols and display units.');continue
-                cards.append({'Name':name,'Symbol':symbol,'Display':mode})
-            if errors:st.error(errors[0])
-            else:
-                with state['lock']:state['cards']=cards;dashboard_market_save(state)
-                st.success('Dashboard cards saved.')
     if st.button('Refresh market prices',type='primary',key='dashboard_refresh_markets'):
         with state['lock']:
             symbols=list(dict.fromkeys([card['Symbol'] for card in state['cards'] if card['Display']!='Crypto INR']+(['INR=X'] if any(card['Display'] in ['Gold ₹/gram','Silver ₹/kg'] for card in state['cards']) else [])))
