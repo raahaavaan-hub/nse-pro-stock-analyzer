@@ -2790,6 +2790,191 @@ def render_independent_stock_charts():
 
 
 
+@st.cache_resource(show_spinner=False)
+def deals_store():
+    import sqlite3
+    folder=Path('.nse_deals');folder.mkdir(exist_ok=True)
+    state={'path':str(folder/'deals.sqlite3'),'lock':threading.RLock(),'rows':[],'movement':{}}
+    with sqlite3.connect(state['path']) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS data(name TEXT PRIMARY KEY,payload TEXT)')
+        for name,payload in db.execute('SELECT name,payload FROM data'):
+            try:state[name]=json.loads(payload)
+            except Exception:pass
+    return state
+
+
+def deals_save(state,name):
+    import sqlite3
+    with sqlite3.connect(state['path']) as db:
+        db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(name,json.dumps(state[name])))
+
+
+def deals_normalize(frame,kind):
+    def clean(value):return re.sub('[^a-z0-9]','',str(value).lower())
+    columns={clean(column):column for column in frame.columns}
+    aliases={
+        'Date':['date','bd_dt_date','blk_dt_date','dealdate','timestamp'],
+        'Symbol':['symbol','bd_symbol','blk_symbol'],
+        'Stock':['security name','securityname','bd_scrip_name','blk_scrip_name','stock'],
+        'Client':['client name','clientname','bd_client_name','blk_client_name'],
+        'Action':['buy / sell','buysell','bd_buy_sell','blk_buy_sell','action'],
+        'Quantity':['quantity traded','quantitytraded','bd_qty_trd','blk_qty_trd','quantity'],
+        'Avg Price':['trade price / wght. avg. price','tradepricewghtavgprice','bd_tp_wavg','blk_tp_wavg','price','avgprice']}
+    output=pd.DataFrame(index=frame.index)
+    for target,names in aliases.items():
+        match=next((columns[clean(name)] for name in names if clean(name) in columns),None)
+        if match is None and target=='Stock':continue
+        if match is None:raise ValueError('Report missing '+target+' column.')
+        output[target]=frame[match]
+    if 'Stock' not in output:output['Stock']=output.Symbol
+    output['Date']=pd.to_datetime(output.Date,dayfirst=True,errors='coerce').dt.strftime('%Y-%m-%d')
+    for column in ['Quantity','Avg Price']:
+        output[column]=pd.to_numeric(output[column].astype(str).str.replace(',','',regex=False),errors='coerce')
+    output['Action']=output.Action.astype(str).str.strip().str.upper().map(lambda value:'Buy' if value in ['B','BUY','PURCHASE'] else 'Sell' if value in ['S','SELL','SALE'] else value)
+    for column in ['Symbol','Stock','Client']:output[column]=output[column].astype(str).str.strip()
+    output['Exchange']='NSE';output['Deal Type']=kind
+    return output.dropna(subset=['Date','Quantity','Avg Price']).to_dict('records')
+
+
+def deals_merge(state,rows):
+    keys=['Date','Symbol','Client','Action','Quantity','Avg Price','Deal Type','Exchange']
+    previous={tuple(row.get(key) for key in keys):row for row in state['rows']}
+    previous.update({tuple(row.get(key) for key in keys):row for row in rows})
+    state['rows']=list(previous.values());deals_save(state,'rows')
+
+
+def deals_fetch(start,end,kind):
+    session=requests.Session();session.headers.update(HEADERS)
+    session.get('https://www.nseindia.com',timeout=(5,15))
+    params={'optionType':'bulk_deals' if kind=='Bulk' else 'block_deals','from':start.strftime('%d-%m-%Y'),'to':end.strftime('%d-%m-%Y'),'csv':'true'}
+    response=session.get('https://www.nseindia.com/api/historicalOR/bulk-block-short-deals',params=params,timeout=(5,25))
+    response.raise_for_status()
+    if '<html' in response.text[:500].lower():raise ValueError('NSE returned a webpage instead of the report.')
+    return deals_normalize(pd.read_csv(io.StringIO(response.text)),kind)
+
+
+def render_deals_table(state):
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    controls=st.columns(3)
+    start=controls[0].date_input('From',today-timedelta(days=7),format='DD/MM/YYYY',key='deals_from')
+    end=controls[1].date_input('To',today,format='DD/MM/YYYY',key='deals_to')
+    kind=controls[2].selectbox('Deal type',['Both','Bulk','Block'],key='deals_kind')
+    if start>end:st.error('From date must not be later than To date.');return
+    if st.button('Load / Update NSE reports',type='primary',key='deals_load'):
+        with loading_stopwatch('Loading NSE deal reports…'):
+            for deal_type in (['Bulk','Block'] if kind=='Both' else [kind]):
+                cursor=start
+                while cursor<=end:
+                    stop=min(end,cursor+timedelta(days=29))
+                    try:
+                        rows=deals_fetch(cursor,stop,deal_type)
+                        with state['lock']:deals_merge(state,rows)
+                    except Exception as exc:
+                        st.warning(deal_type+' report unavailable: '+str(exc)+'. Use the CSV import below; saved reports are retained.');break
+                    cursor=stop+timedelta(days=1)
+    with st.expander('Import official NSE CSV if automatic access is unavailable'):
+        st.markdown('[Download NSE bulk/block reports](https://www.nseindia.com/report-detail/display-bulk-and-block-deals)')
+        import_kind=st.selectbox('Uploaded report type',['Bulk','Block'],key='deals_import_kind')
+        uploaded=st.file_uploader('NSE report CSV',type=['csv'],key='deals_csv_upload')
+        if uploaded and st.button('Save uploaded report',key='deals_import_save'):
+            try:
+                rows=deals_normalize(pd.read_csv(uploaded),import_kind)
+                with state['lock']:deals_merge(state,rows)
+                st.success(f'{len(rows):,} report rows saved.')
+            except Exception as exc:st.error(str(exc))
+    with state['lock']:frame=pd.DataFrame(state['rows'])
+    if frame.empty:st.info('Load an NSE report or import its CSV to see disclosed deals.');return
+    frame=frame[(frame.Date>=start.isoformat())&(frame.Date<=end.isoformat())]
+    if kind!='Both':frame=frame[frame['Deal Type']==kind]
+    controls=st.columns([3,1,1])
+    search=controls[0].text_input('Search stock or client',key='deals_search')
+    side=controls[1].selectbox('Action',['All','Buy','Sell'],key='deals_action')
+    limit=controls[2].selectbox('Rows per page',[25,50,100],key='deals_rows')
+    if search:frame=frame[frame[['Symbol','Stock','Client']].astype(str).apply(lambda row:row.str.contains(search,case=False,regex=False).any(),axis=1)]
+    if side!='All':frame=frame[frame.Action==side]
+    frame=frame.sort_values(['Date','Symbol'],ascending=[False,True]).reset_index(drop=True)
+    # Latest outstanding shares give an estimate, not historical report-date ownership.
+    meta=fast_percentage_store()['meta']
+    frame['Traded % (est.)']=[float(row.Quantity)/float(meta.get(row.Symbol,{}).get('shares'))*100 if pd.notna(meta.get(row.Symbol,{}).get('shares',np.nan)) and float(meta[row.Symbol]['shares'])>0 else np.nan for row in frame.itertuples()]
+    st.caption(f'{len(frame):,} matching disclosed deals. Traded % uses latest saved outstanding shares and is an estimate. Buy/sell rows are not matched to infer intraday deals.')
+    if frame.empty:st.info('No saved deals match these filters.');return
+    pages=max(1,(len(frame)+limit-1)//limit)
+    page=st.number_input('Page',min_value=1,max_value=pages,value=1,key='deals_page_'+str(pages)+'_'+str(limit))
+    shown=frame.iloc[(page-1)*limit:page*limit].copy()
+    shown['Date']=pd.to_datetime(shown.Date).dt.strftime('%d/%m/%Y')
+    shown=shown[['Stock','Client','Exchange','Deal Type','Action','Date','Avg Price','Quantity','Traded % (est.)']]
+    styled=shown.style.map(lambda value:'color:#16a34a;font-weight:bold' if value=='Buy' else 'color:#dc2626;font-weight:bold' if value=='Sell' else '',subset=['Action']).format({'Quantity':fast_indian_share_format,'Avg Price':'₹{:,.2f}','Traded % (est.)':'{:.2f}%'},na_rep='—')
+    st.dataframe(styled,hide_index=True,use_container_width=True,height=min(600,38+len(shown)*35))
+    st.download_button('Download filtered deals',frame.to_csv(index=False),'deals.csv','text/csv',key='deals_export')
+
+
+def render_deals_movement(state):
+    st.caption('Daily-history market movement inspired by your reference. This view is not a live intraday feed.')
+    controls=st.columns([2,2,1])
+    group=controls[0].selectbox('Universe',['NIFTY 50','NIFTY 100','NIFTY 500','All saved stocks'],key='deals_move_group')
+    period=controls[1].selectbox('Period',['1 Week','2 Weeks','1 Month','3 Months','6 Months','1 Year'],key='deals_move_period')
+    max_lines=controls[2].selectbox('Lines',[50,100,250,500],key='deals_move_lines')
+    saved=fast_percentage_store()
+    if group=='All saved stocks':symbols=sorted(set(saved['records'])|set(state['movement']))
+    else:
+        try:catalog=nse_sector_constituents(group);symbols=catalog.Symbol.tolist()
+        except Exception as exc:st.error('Stock list unavailable: '+str(exc));return
+    if st.button('Update movement prices',type='primary',key='deals_move_update'):
+        progress=st.progress(0.0)
+        with loading_stopwatch('Updating separate Deals movement data…'):
+            try:
+                for offset in range(0,len(symbols),70):
+                    batch=symbols[offset:offset+70]
+                    download,limited=limited_price_download([symbol+'.NS' for symbol in batch],period='1y',interval='1d',group_by='ticker',auto_adjust=False,progress=False)
+                    with state['lock']:
+                        for symbol in batch:
+                            source=market_cache_frame(download,symbol,symbol+'.NS',len(batch))
+                            if not source.empty:
+                                record=market_cache_merge(None,source,datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat())
+                                if record:state['movement'][symbol]=record
+                        deals_save(state,'movement')
+                    progress.progress(min(1,(offset+len(batch))/max(1,len(symbols))))
+                    if limited:st.warning('Provider limited requests; saved data retained.');break
+            except Exception as exc:st.warning('Update stopped; saved data kept. '+str(exc))
+        progress.empty()
+    count=NSE_PERCENT_PERIODS[period];paths=[];rows=[]
+    with saved['lock'],state['lock']:
+        for symbol in symbols:
+            record=state['movement'].get(symbol) or saved['records'].get(symbol,{}).get('record',{})
+            closes=record.get('closes',[])
+            if len(closes)<count+1:continue
+            history=closes[-count-1:];baseline=float(history[0][1])
+            if baseline<=0:continue
+            values=[(float(value)/baseline-1)*100 for _,value in history]
+            sector=saved['meta'].get(symbol,{}).get('sector','Unclassified')
+            paths.append((symbol,history,values));rows.append({'Symbol':symbol,'Sector / Business':sector,'Change %':values[-1],'Price Date':history[-1][0]})
+    if not rows:st.info('No sufficient saved history. Click Update movement prices.');return
+    frame=pd.DataFrame(rows);gainers=int((frame['Change %']>0).sum());losers=int((frame['Change %']<0).sum())
+    st.caption(f'{len(frame):,} stocks · {gainers:,} gainers · {losers:,} losers · different saved end dates may occur. Lines measure change from the start of the selected period.')
+    fig=go.Figure()
+    for symbol,history,values in sorted(paths,key=lambda item:abs(item[2][-1]),reverse=True)[:max_lines]:
+        fig.add_trace(go.Scattergl(x=[day for day,_ in history],y=values,mode='lines',name=symbol,line=dict(color='#16a34a' if values[-1]>=0 else '#dc2626',width=0.8),opacity=0.35,hovertemplate=symbol+'<br>%{x}<br>%{y:+.2f}%<extra></extra>'))
+    fig.update_layout(height=460,showlegend=False,yaxis_title='Change from start (%)',margin=dict(l=20,r=15,t=10,b=25))
+    left,right=st.columns([3,2])
+    with left:st.plotly_chart(fig,use_container_width=True)
+    with right:
+        st.markdown('**Sector / stock heatmap**')
+        import plotly.express as px
+        tile=frame.copy();tile['Tile size']=1
+        heat=px.treemap(tile,path=['Sector / Business','Symbol'],values='Tile size',color='Change %',color_continuous_scale=['#dc2626','#f1f5f9','#16a34a'],color_continuous_midpoint=0,hover_data=['Change %','Price Date'])
+        heat.update_layout(height=460,margin=dict(l=0,r=0,t=0,b=0));heat.update_traces(texttemplate='%{label}<br>%{color:+.1f}%')
+        st.plotly_chart(heat,use_container_width=True)
+    st.dataframe(nse_percentage_style(frame.sort_values('Change %',ascending=False)),hide_index=True,use_container_width=True)
+
+
+def render_deals():
+    st.markdown('## 🤝 Deals')
+    state=deals_store()
+    view=st.radio('View',['Market Movement','Bulk / Block Deals'],horizontal=True,key='deals_view')
+    if view=='Market Movement':render_deals_movement(state)
+    else:render_deals_table(state)
+
+
 def render_nse_sector_view(group):
     st.markdown('#### 🧩 Sector-wise Stocks')
     periods={'1 Day':1,'5 Days':5,'1 Month':21,'3 Months':63,'6 Months':126,'1 Year':252,'5 Years':1260}
@@ -2861,7 +3046,7 @@ st.markdown("""<style>
 </style>""",unsafe_allow_html=True)
 
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","📈 Charts","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","🤝 Deals","📈 Charts","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
@@ -3670,6 +3855,9 @@ elif page=="🎯 Brokerage Calls":
         st.download_button("⬇️ Download Brokerage Calls CSV",df.to_csv(index=False).encode(),"brokerage_calls.csv","text/csv")
         st.info("Target and symbol are parsed only when clearly present in public news text. Blank means not confidently detected.")
 
+
+elif page=="🤝 Deals":
+    render_deals()
 
 elif page=="📈 Charts":
     render_independent_stock_charts()
