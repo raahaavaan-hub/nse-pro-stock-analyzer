@@ -3216,7 +3216,8 @@ DASHBOARD_MARKET_DEFAULTS=[
     {'Name':'Nifty 50','Symbol':'^NSEI','Display':'Points'},
     {'Name':'Nasdaq Composite','Symbol':'^IXIC','Display':'Points'},
     {'Name':'China — Shanghai','Symbol':'000001.SS','Display':'Points'},
-    {'Name':'Korea — KOSPI','Symbol':'^KS11','Display':'Points'}]
+    {'Name':'Korea — KOSPI','Symbol':'^KS11','Display':'Points'},
+    {'Name':'Beldex — BDX','Symbol':'CG:BELDEX','Display':'Crypto INR'}]
 
 
 @st.cache_resource(show_spinner=False)
@@ -3229,13 +3230,16 @@ def dashboard_market_store():
         for name,payload in db.execute('SELECT name,payload FROM settings'):
             try:state[name]=json.loads(payload)
             except Exception:pass
+    if not state.get('crypto_added'):
+        if not any(card.get('Symbol')=='CG:BELDEX' for card in state['cards']):state['cards'].append({'Name':'Beldex — BDX','Symbol':'CG:BELDEX','Display':'Crypto INR'})
+        state['crypto_added']=True;dashboard_market_save(state)
     return state
 
 
 def dashboard_market_save(state):
     import sqlite3
     with sqlite3.connect(state['path']) as db:
-        for name in ['cards','quotes','checked']:
+        for name in ['cards','quotes','checked','crypto_added']:
             db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(name,json.dumps(state[name])))
 
 
@@ -3261,20 +3265,44 @@ def dashboard_indian_price(value):
     return fast_indian_share_format(int(whole))+'.'+fraction
 
 
+def dashboard_move_date(delta):
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    st.session_state['dashboard_date']=min(today,st.session_state.get('dashboard_date',today)+timedelta(days=delta))
+
+
+def dashboard_crypto_snapshot(symbol,selected):
+    from urllib.parse import quote
+    coin=symbol.split(':',1)[1].lower()
+    rows=[]
+    for day in [selected-timedelta(days=1),selected]:
+        response=requests.get('https://api.coingecko.com/api/v3/coins/'+quote(coin,safe='')+'/history',params={'date':day.strftime('%d-%m-%Y'),'localization':'false'},headers=HEADERS,timeout=(5,15))
+        response.raise_for_status()
+        price=response.json().get('market_data',{}).get('current_price',{}).get('inr')
+        if price is not None and np.isfinite(float(price)) and float(price)>0:rows.append([day.isoformat(),float(price)])
+    return rows
+
+
 def render_market_dashboard():
     st.markdown('## 🏠 Market Dashboard')
     now=datetime.now(ZoneInfo('Asia/Kolkata'))
     st.caption(now.strftime('%d/%m/%Y · %I:%M %p IST')+' · Saved daily closing prices, not a live tick feed.')
     state=dashboard_market_store()
+    today=now.date()
+    if 'dashboard_date' not in st.session_state:st.session_state['dashboard_date']=today
+    nav=st.columns([1,4,1,2])
+    nav[0].button('‹',key='dashboard_previous',on_click=dashboard_move_date,args=(-1,))
+    selected=nav[1].date_input('Market date',format='DD/MM/YYYY',max_value=today,key='dashboard_date')
+    nav[2].button('›',key='dashboard_next',on_click=dashboard_move_date,args=(1,),disabled=selected>=today)
+    nav[3].button('Today',key='dashboard_today',on_click=lambda:st.session_state.update(dashboard_date=today))
     with st.expander('Edit names / symbols · Add or delete cards'):
-        st.caption('Rename changes the label only. Use Yahoo symbols: ^NSEI, ^IXIC, 000001.SS, ^KS11, INR=X. Gold/Silver conversion modes require USD-per-troy-ounce instruments; Points remain index points.')
-        edited=st.data_editor(pd.DataFrame(state['cards'],columns=['Name','Symbol','Display']),num_rows='dynamic',hide_index=True,use_container_width=True,key='dashboard_card_editor',column_config={'Display':st.column_config.SelectboxColumn('Display',options=['Points','INR','Gold ₹/gram','Silver ₹/kg'],required=True)})
+        st.caption('Rename changes the label only. Use Yahoo symbols: ^NSEI, ^IXIC, 000001.SS, ^KS11, INR=X. For crypto, use CoinGecko IDs: CG:BELDEX, CG:BITCOIN, CG:ETHEREUM with Crypto INR. Gold/Silver conversion modes require USD-per-troy-ounce instruments; Points remain index points.')
+        edited=st.data_editor(pd.DataFrame(state['cards'],columns=['Name','Symbol','Display']),num_rows='dynamic',hide_index=True,use_container_width=True,key='dashboard_card_editor',column_config={'Display':st.column_config.SelectboxColumn('Display',options=['Points','INR','Gold ₹/gram','Silver ₹/kg','Crypto INR'],required=True)})
         if st.button('Save dashboard cards',key='dashboard_save_cards'):
             cards=[];errors=[]
             for _,row in edited.iterrows():
                 if pd.isna(row.Name) or pd.isna(row.Symbol):errors.append('Each card needs a name and symbol.');continue
                 name=str(row.Name).strip();symbol=str(row.Symbol).strip().upper();mode=row.Display
-                if not name or not re.fullmatch(r'[A-Z0-9^=.&_-]{1,40}',symbol) or mode not in ['Points','INR','Gold ₹/gram','Silver ₹/kg']:
+                if (mode=='Crypto INR' and not symbol.startswith('CG:')) or not name or not re.fullmatch(r'[A-Z0-9^=:.&_\-]{1,40}',symbol) or mode not in ['Points','INR','Gold ₹/gram','Silver ₹/kg','Crypto INR']:
                     errors.append('Check card names, symbols and display units.');continue
                 cards.append({'Name':name,'Symbol':symbol,'Display':mode})
             if errors:st.error(errors[0])
@@ -3283,11 +3311,20 @@ def render_market_dashboard():
                 st.success('Dashboard cards saved.')
     if st.button('Refresh market prices',type='primary',key='dashboard_refresh_markets'):
         with state['lock']:
-            symbols=list(dict.fromkeys([card['Symbol'] for card in state['cards']]+(['INR=X'] if any(card['Display'] in ['Gold ₹/gram','Silver ₹/kg'] for card in state['cards']) else [])))
+            symbols=list(dict.fromkeys([card['Symbol'] for card in state['cards'] if card['Display']!='Crypto INR']+(['INR=X'] if any(card['Display'] in ['Gold ₹/gram','Silver ₹/kg'] for card in state['cards']) else [])))
+        crypto_cards=[card for card in state['cards'] if card['Display']=='Crypto INR']
+        for card in crypto_cards:
+            try:
+                rows=dashboard_crypto_snapshot(card['Symbol'],selected)
+                with state['lock']:
+                    existing=dict(state['quotes'].get(card['Symbol'],[]));existing.update(dict(rows))
+                    state['quotes'][card['Symbol']]=sorted(existing.items());dashboard_market_save(state)
+                if not rows:st.warning(card['Name']+': selected-date snapshot unavailable.')
+            except Exception as exc:st.warning(card['Name']+': crypto snapshot unavailable; saved values kept. '+str(exc))
         if symbols:
             with loading_stopwatch('Refreshing dashboard markets…'):
                 try:
-                    download,limited=limited_price_download(symbols,period='1mo',interval='1d',group_by='ticker',auto_adjust=False,progress=False)
+                    download,limited=limited_price_download(symbols,start=(selected-timedelta(days=35)).isoformat(),end=(selected+timedelta(days=1)).isoformat(),interval='1d',group_by='ticker',auto_adjust=False,progress=False)
                     updated=0
                     with state['lock']:
                         for symbol in symbols:
@@ -3297,7 +3334,9 @@ def render_market_dashboard():
                             for stamp,value in frame.Close.items():
                                 if pd.notna(value) and np.isfinite(float(value)) and float(value)>0:
                                     rows.append([pd.Timestamp(stamp).date().isoformat(),float(value)])
-                            if rows:state['quotes'][symbol]=rows;updated+=1
+                            if rows:
+                                existing=dict(state['quotes'].get(symbol,[]));existing.update(dict(rows))
+                                state['quotes'][symbol]=sorted(existing.items());updated+=1
                         state['checked']=datetime.now(ZoneInfo('Asia/Kolkata')).strftime('%d/%m/%Y %I:%M %p IST');dashboard_market_save(state)
                     if updated<len(symbols):st.warning(f'{updated}/{len(symbols)} symbols refreshed. Unavailable symbols retain earlier saved prices.')
                     if limited:st.warning('Provider rate limit reached. Saved prices retained.')
@@ -3312,7 +3351,8 @@ def render_market_dashboard():
         for col,card in zip(columns,cards[offset:offset+4]):
             with col:
                 series=dashboard_market_series(card,quotes)
-                unit='₹/gram' if card['Display']=='Gold ₹/gram' else '₹/kg' if card['Display']=='Silver ₹/kg' else '₹' if card['Display']=='INR' else 'points'
+                series=series[series.index<=pd.Timestamp(selected)]
+                unit='₹/gram' if card['Display']=='Gold ₹/gram' else '₹/kg' if card['Display']=='Silver ₹/kg' else '₹/coin' if card['Display']=='Crypto INR' else '₹' if card['Display']=='INR' else 'points'
                 if series.empty:
                     st.markdown('**'+html.escape(card['Name'])+'**');st.caption('Price unavailable · '+unit);continue
                 price=float(series.iloc[-1]);change=(price/float(series.iloc[-2])-1)*100 if len(series)>1 else np.nan
@@ -3321,8 +3361,8 @@ def render_market_dashboard():
                 else:value+=' pts'
                 st.metric(card['Name'],value,f'{change:+.2f}%' if pd.notna(change) else None)
                 st.caption(series.index[-1].strftime('%d/%m/%Y')+' · '+unit+' · '+card['Symbol'])
-                st.line_chart(series.rename('Price'),height=100,use_container_width=True)
-    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Overseas indices remain points. Daily change compares the latest two available closes.')
+                if (pd.Timestamp(selected)-series.index[-1]).days>7:st.caption('Older saved price — refresh this date.')
+    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Crypto uses CoinGecko historical date snapshots (UTC reference) in ₹/coin; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
 
 
 if page=="🏠 Dashboard":
