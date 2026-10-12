@@ -3209,16 +3209,124 @@ def PA_nse_shareholding(symbol):
         if any(row[k] is not None for k in ["Promoters","FII","DII","Government","Public","Others"]):rows.append(row)
     return pd.DataFrame(rows).drop_duplicates().tail(12) if rows else pd.DataFrame()
 
+DASHBOARD_MARKET_DEFAULTS=[
+    {'Name':'Gold benchmark','Symbol':'GC=F','Display':'Gold ₹/gram'},
+    {'Name':'Silver benchmark','Symbol':'SI=F','Display':'Silver ₹/kg'},
+    {'Name':'USD / INR','Symbol':'INR=X','Display':'INR'},
+    {'Name':'Nifty 50','Symbol':'^NSEI','Display':'Points'},
+    {'Name':'Nasdaq Composite','Symbol':'^IXIC','Display':'Points'},
+    {'Name':'China — Shanghai','Symbol':'000001.SS','Display':'Points'},
+    {'Name':'Korea — KOSPI','Symbol':'^KS11','Display':'Points'}]
+
+
+@st.cache_resource(show_spinner=False)
+def dashboard_market_store():
+    import sqlite3
+    folder=Path('.nse_dashboard');folder.mkdir(exist_ok=True)
+    state={'path':str(folder/'markets.sqlite3'),'lock':threading.RLock(),'cards':[dict(item) for item in DASHBOARD_MARKET_DEFAULTS],'quotes':{},'checked':''}
+    with sqlite3.connect(state['path']) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY,payload TEXT)')
+        for name,payload in db.execute('SELECT name,payload FROM settings'):
+            try:state[name]=json.loads(payload)
+            except Exception:pass
+    return state
+
+
+def dashboard_market_save(state):
+    import sqlite3
+    with sqlite3.connect(state['path']) as db:
+        for name in ['cards','quotes','checked']:
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(name,json.dumps(state[name])))
+
+
+def dashboard_market_series(card,quotes):
+    source=quotes.get(card['Symbol'],[])
+    if not source:return pd.Series(dtype=float)
+    raw=pd.Series({pd.Timestamp(day):float(value) for day,value in source}).sort_index()
+    if card['Display'] in ['Gold ₹/gram','Silver ₹/kg']:
+        fx_source=quotes.get('INR=X',[])
+        if not fx_source:return pd.Series(dtype=float)
+        fx=pd.Series({pd.Timestamp(day):float(value) for day,value in fx_source}).sort_index()
+        combined=fx.reindex(fx.index.union(raw.index)).sort_index().ffill()
+        # Reject conversions without an FX observation in the preceding seven days.
+        dates=pd.Series(fx.index,index=fx.index).reindex(combined.index).ffill()
+        valid=[stamp for stamp in raw.index if stamp in dates.index and pd.notna(dates.loc[stamp]) and (stamp-dates.loc[stamp]).days<=7]
+        raw=raw.reindex(valid)*combined.reindex(valid)/31.1034768
+        if card['Display']=='Silver ₹/kg':raw=raw*1000
+    return raw.replace([np.inf,-np.inf],np.nan).dropna()
+
+
+def dashboard_indian_price(value):
+    rounded=format(float(value),'.2f');whole,fraction=rounded.split('.')
+    return fast_indian_share_format(int(whole))+'.'+fraction
+
+
+def render_market_dashboard():
+    st.markdown('## 🏠 Market Dashboard')
+    now=datetime.now(ZoneInfo('Asia/Kolkata'))
+    st.caption(now.strftime('%d/%m/%Y · %I:%M %p IST')+' · Saved daily closing prices, not a live tick feed.')
+    state=dashboard_market_store()
+    with st.expander('Edit names / symbols · Add or delete cards'):
+        st.caption('Rename changes the label only. Use Yahoo symbols: ^NSEI, ^IXIC, 000001.SS, ^KS11, INR=X. Gold/Silver conversion modes require USD-per-troy-ounce instruments; Points remain index points.')
+        edited=st.data_editor(pd.DataFrame(state['cards'],columns=['Name','Symbol','Display']),num_rows='dynamic',hide_index=True,use_container_width=True,key='dashboard_card_editor',column_config={'Display':st.column_config.SelectboxColumn('Display',options=['Points','INR','Gold ₹/gram','Silver ₹/kg'],required=True)})
+        if st.button('Save dashboard cards',key='dashboard_save_cards'):
+            cards=[];errors=[]
+            for _,row in edited.iterrows():
+                if pd.isna(row.Name) or pd.isna(row.Symbol):errors.append('Each card needs a name and symbol.');continue
+                name=str(row.Name).strip();symbol=str(row.Symbol).strip().upper();mode=row.Display
+                if not name or not re.fullmatch(r'[A-Z0-9^=.&_-]{1,40}',symbol) or mode not in ['Points','INR','Gold ₹/gram','Silver ₹/kg']:
+                    errors.append('Check card names, symbols and display units.');continue
+                cards.append({'Name':name,'Symbol':symbol,'Display':mode})
+            if errors:st.error(errors[0])
+            else:
+                with state['lock']:state['cards']=cards;dashboard_market_save(state)
+                st.success('Dashboard cards saved.')
+    if st.button('Refresh market prices',type='primary',key='dashboard_refresh_markets'):
+        with state['lock']:
+            symbols=list(dict.fromkeys([card['Symbol'] for card in state['cards']]+(['INR=X'] if any(card['Display'] in ['Gold ₹/gram','Silver ₹/kg'] for card in state['cards']) else [])))
+        if symbols:
+            with loading_stopwatch('Refreshing dashboard markets…'):
+                try:
+                    download,limited=limited_price_download(symbols,period='1mo',interval='1d',group_by='ticker',auto_adjust=False,progress=False)
+                    updated=0
+                    with state['lock']:
+                        for symbol in symbols:
+                            frame=market_cache_frame(download,symbol,symbol,len(symbols))
+                            if frame.empty or 'Close' not in frame:continue
+                            rows=[]
+                            for stamp,value in frame.Close.items():
+                                if pd.notna(value) and np.isfinite(float(value)) and float(value)>0:
+                                    rows.append([pd.Timestamp(stamp).date().isoformat(),float(value)])
+                            if rows:state['quotes'][symbol]=rows;updated+=1
+                        state['checked']=datetime.now(ZoneInfo('Asia/Kolkata')).strftime('%d/%m/%Y %I:%M %p IST');dashboard_market_save(state)
+                    if updated<len(symbols):st.warning(f'{updated}/{len(symbols)} symbols refreshed. Unavailable symbols retain earlier saved prices.')
+                    if limited:st.warning('Provider rate limit reached. Saved prices retained.')
+                except Exception as exc:st.warning('Refresh unavailable; saved prices retained. '+str(exc))
+    with state['lock']:
+        cards=[dict(card) for card in state['cards']];quotes=dict(state['quotes']);checked=state['checked']
+    if checked:st.caption('Last refresh attempt: '+checked)
+    if not quotes:st.info('Click Refresh market prices once to populate your cards.')
+    if not cards:st.info('Add cards using Edit names / symbols above.');return
+    for offset in range(0,len(cards),4):
+        columns=st.columns(4)
+        for col,card in zip(columns,cards[offset:offset+4]):
+            with col:
+                series=dashboard_market_series(card,quotes)
+                unit='₹/gram' if card['Display']=='Gold ₹/gram' else '₹/kg' if card['Display']=='Silver ₹/kg' else '₹' if card['Display']=='INR' else 'points'
+                if series.empty:
+                    st.markdown('**'+html.escape(card['Name'])+'**');st.caption('Price unavailable · '+unit);continue
+                price=float(series.iloc[-1]);change=(price/float(series.iloc[-2])-1)*100 if len(series)>1 else np.nan
+                value=dashboard_indian_price(price)
+                if card['Display']!='Points':value='₹'+value
+                else:value+=' pts'
+                st.metric(card['Name'],value,f'{change:+.2f}%' if pd.notna(change) else None)
+                st.caption(series.index[-1].strftime('%d/%m/%Y')+' · '+unit+' · '+card['Symbol'])
+                st.line_chart(series.rename('Price'),height=100,use_container_width=True)
+    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Overseas indices remain points. Daily change compares the latest two available closes.')
+
+
 if page=="🏠 Dashboard":
-    st.markdown('<div class="hero"><div class="eyebrow">NSE MARKET INTELLIGENCE</div><h1>Smart stock research.<br>One fast terminal.</h1><p>Analyze fundamentals and technicals, scan swing opportunities, follow stock news and brokerage calls, and stop maintaining closing prices manually.</p></div>',unsafe_allow_html=True)
-    c=st.columns(4)
-    vals=[("🧠 PRO ANALYZER","10 + 10 Score","Fundamental + Technical"),
-          ("🚀 SWING LIBRARY",str(len(SCREENERS))+" Screeners","Momentum & Breakout"),
-          ("📰 MARKET INTEL","News + Calls","Events & Broker Targets"),
-          ("🌐 NSE PERFORMANCE","1D → 5Y","Automatic Market Data")]
-    for col,v in zip(c,vals):
-        with col:
-            st.markdown(f'<div class="kpi"><span>{v[0]}</span><b>{v[1]}</b><small>{v[2]}</small></div>',unsafe_allow_html=True)
+    render_market_dashboard()
 
 elif page=="📌 Watchlist":
     st.markdown("<div class='hero'><div class='eyebrow'>MY STOCK IDEAS</div><h1>📌 Watchlist</h1><p>Ten named lists. Enter your target price and stop loss; compare them with the latest available NSE daily close.</p></div>",unsafe_allow_html=True)
