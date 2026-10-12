@@ -2807,7 +2807,7 @@ def deals_store():
 def deals_save(state,name):
     import sqlite3
     with sqlite3.connect(state['path']) as db:
-        db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(name,json.dumps(state[name])))
+        db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(name,json.dumps(state.get(name,{} if name=='crypto_live' else False))))
 
 
 def deals_normalize(frame,kind):
@@ -3211,7 +3211,7 @@ def PA_nse_shareholding(symbol):
 
 DASHBOARD_MARKET_DEFAULTS=[
     {'Name':'Gold benchmark','Symbol':'GC=F','Display':'Gold ₹/gram'},
-    {'Name':'Silver benchmark','Symbol':'SI=F','Display':'Silver ₹/kg'},
+    {'Name':'SilverBeES','Symbol':'SILVERBEES.NS','Display':'INR'},
     {'Name':'USD / INR','Symbol':'INR=X','Display':'INR'},
     {'Name':'Nifty 50','Symbol':'^NSEI','Display':'Points'},
     {'Name':'Nasdaq Composite','Symbol':'^IXIC','Display':'Points'},
@@ -3224,7 +3224,7 @@ DASHBOARD_MARKET_DEFAULTS=[
 def dashboard_market_store():
     import sqlite3
     folder=Path('.nse_dashboard');folder.mkdir(exist_ok=True)
-    state={'path':str(folder/'markets.sqlite3'),'lock':threading.RLock(),'cards':[dict(item) for item in DASHBOARD_MARKET_DEFAULTS],'quotes':{},'checked':''}
+    state={'path':str(folder/'markets.sqlite3'),'lock':threading.RLock(),'cards':[dict(item) for item in DASHBOARD_MARKET_DEFAULTS],'quotes':{},'checked':'','crypto_live':{}}
     with sqlite3.connect(state['path']) as db:
         db.execute('CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY,payload TEXT)')
         for name,payload in db.execute('SELECT name,payload FROM settings'):
@@ -3233,14 +3233,19 @@ def dashboard_market_store():
     if not state.get('crypto_added'):
         if not any(card.get('Symbol')=='CG:BELDEX' for card in state['cards']):state['cards'].append({'Name':'Beldex — BDX','Symbol':'CG:BELDEX','Display':'Crypto INR'})
         state['crypto_added']=True;dashboard_market_save(state)
+    if not state.get('silverbees_added'):
+        for card in state['cards']:
+            if card.get('Symbol')=='SI=F':card.update(Name='SilverBeES',Symbol='SILVERBEES.NS',Display='INR')
+        state['silverbees_added']=True;dashboard_market_save(state)
+    state.setdefault('crypto_live',{})
     return state
 
 
 def dashboard_market_save(state):
     import sqlite3
     with sqlite3.connect(state['path']) as db:
-        for name in ['cards','quotes','checked','crypto_added']:
-            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(name,json.dumps(state[name])))
+        for name in ['cards','quotes','checked','crypto_added','silverbees_added','crypto_live']:
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(name,json.dumps(state.get(name,{} if name=='crypto_live' else False))))
 
 
 def dashboard_market_series(card,quotes):
@@ -3270,6 +3275,16 @@ def dashboard_move_date(delta):
     st.session_state['dashboard_date']=min(today,st.session_state.get('dashboard_date',today)+timedelta(days=delta))
 
 
+def dashboard_crypto_current(symbol):
+    coin=symbol.split(':',1)[1].lower()
+    response=requests.get('https://api.coingecko.com/api/v3/simple/price',params={'ids':coin,'vs_currencies':'inr','include_24hr_change':'true','include_last_updated_at':'true'},headers=HEADERS,timeout=(5,15))
+    response.raise_for_status();data=response.json().get(coin,{})
+    price=float(data.get('inr',0));updated=int(data.get('last_updated_at',0))
+    if not np.isfinite(price) or price<=0 or updated<=0:raise ValueError('Current crypto quote missing price or update time.')
+    change=data.get('inr_24h_change')
+    return {'price':price,'change':float(change) if change is not None and np.isfinite(float(change)) else None,'updated':updated}
+
+
 def dashboard_crypto_snapshot(symbol,selected):
     from urllib.parse import quote
     coin=symbol.split(':',1)[1].lower()
@@ -3285,7 +3300,7 @@ def dashboard_crypto_snapshot(symbol,selected):
 def render_market_dashboard():
     st.markdown('## 🏠 Market Dashboard')
     now=datetime.now(ZoneInfo('Asia/Kolkata'))
-    st.caption(now.strftime('%d/%m/%Y · %I:%M %p IST')+' · Saved daily closing prices, not a live tick feed.')
+    st.caption(now.strftime('%d/%m/%Y · %I:%M %p IST')+' · Market cards use saved daily closes; Today’s crypto quote updates when you click Refresh.')
     state=dashboard_market_store()
     today=now.date()
     if 'dashboard_date' not in st.session_state:st.session_state['dashboard_date']=today
@@ -3300,6 +3315,11 @@ def render_market_dashboard():
         crypto_cards=[card for card in state['cards'] if card['Display']=='Crypto INR']
         for card in crypto_cards:
             try:
+                if selected==today:
+                    live=dashboard_crypto_current(card['Symbol'])
+                    with state['lock']:
+                        state.setdefault('crypto_live',{})[card['Symbol']]=live;dashboard_market_save(state)
+                    continue
                 rows=dashboard_crypto_snapshot(card['Symbol'],selected)
                 with state['lock']:
                     existing=dict(state['quotes'].get(card['Symbol'],[]));existing.update(dict(rows))
@@ -3327,9 +3347,9 @@ def render_market_dashboard():
                     if limited:st.warning('Provider rate limit reached. Saved prices retained.')
                 except Exception as exc:st.warning('Refresh unavailable; saved prices retained. '+str(exc))
     with state['lock']:
-        cards=[dict(card) for card in state['cards']];quotes=dict(state['quotes']);checked=state['checked']
+        cards=[dict(card) for card in state['cards']];quotes=dict(state['quotes']);checked=state['checked'];crypto_live=dict(state.get('crypto_live',{}))
     if checked:st.caption('Last refresh attempt: '+checked)
-    if not quotes:st.info('Click Refresh market prices once to populate your cards.')
+    if not quotes and not crypto_live:st.info('Click Refresh market prices once to populate your cards.')
     if not cards:st.info('Add cards using Edit names / symbols above.');return
     for offset in range(0,len(cards),4):
         columns=st.columns(4)
@@ -3337,17 +3357,26 @@ def render_market_dashboard():
             with col:
                 series=dashboard_market_series(card,quotes)
                 if not series.empty:series=series[series.index<=pd.Timestamp(selected)]
+                live=crypto_live.get(card['Symbol']) if selected==today and card['Display']=='Crypto INR' else None
+                if live:
+                    updated=datetime.fromtimestamp(live['updated'],ZoneInfo('Asia/Kolkata'))
+                    series=pd.Series([live['price']],index=pd.DatetimeIndex([pd.Timestamp(updated.date())]))
                 unit='₹/gram' if card['Display']=='Gold ₹/gram' else '₹/kg' if card['Display']=='Silver ₹/kg' else '₹/coin' if card['Display']=='Crypto INR' else '₹' if card['Display']=='INR' else 'points'
                 if series.empty:
                     st.markdown('**'+html.escape(card['Name'])+'**');st.caption('Price unavailable · '+unit);continue
                 price=float(series.iloc[-1]);change=(price/float(series.iloc[-2])-1)*100 if len(series)>1 else np.nan
+                if live:change=live.get('change') if live.get('change') is not None else np.nan
                 value=dashboard_indian_price(price)
                 if card['Display']!='Points':value='₹'+value
                 else:value+=' pts'
                 st.metric(card['Name'],value,f'{change:+.2f}%' if pd.notna(change) else None)
-                st.caption(series.index[-1].strftime('%d/%m/%Y')+' · '+unit+' · '+card['Symbol'])
+                st.caption(series.index[-1].strftime('%d/%m/%Y')+' · '+('₹/ETF unit' if card['Symbol']=='SILVERBEES.NS' else unit)+' · '+card['Symbol'])
+                if live:
+                    st.caption('CoinGecko quote: '+updated.strftime('%d/%m/%Y %I:%M %p IST')+' · change over 24 hours')
+                    if (now-updated).total_seconds()>900:st.caption('Saved quote is older than 15 minutes — click Refresh market prices.')
+                elif card['Display']=='Crypto INR' and selected==today:st.caption('Historical snapshot — current quote not loaded.')
                 if (pd.Timestamp(selected)-series.index[-1]).days>7:st.caption('Older saved price — refresh this date.')
-    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Crypto uses CoinGecko historical date snapshots (UTC reference) in ₹/coin; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
+    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Today’s crypto uses CoinGecko current INR quotes with source update time and 24-hour change; past dates use historical snapshots (UTC reference). SilverBeES is ₹ per ETF unit, not silver per kg; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
 
 
 if page=="🏠 Dashboard":
