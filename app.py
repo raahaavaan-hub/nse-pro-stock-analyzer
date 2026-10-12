@@ -2535,12 +2535,63 @@ def fast_save_settings():
         store['fast_settings']=settings
 
 
+FAST_STOCK_RETURN_PERIODS=['1 Day','1 Week','2 Weeks','1 Month','3 Months','6 Months','1 Year','2 Years']
+
+
+def fast_stock_returns(record):
+    return {period:nse_percentage_return(record,period) for period in FAST_STOCK_RETURN_PERIODS}
+
+
+def render_fast_by_stock(store):
+    st.caption('Choose a stock to compare all periods together. Returns use saved closing prices; selecting a stock makes no price download.')
+    if st.button('Load full NSE stock list',key='fast_stock_directory_load'):
+        st.session_state['fast_stock_directory']=universe()
+    symbols=sorted(set(store['records'])|set(st.session_state.get('fast_stock_directory',[]))|set(FALLBACK))
+    labels=lambda symbol:symbol+' — '+str(store['meta'].get(symbol,{}).get('company',symbol)) if store['meta'].get(symbol,{}).get('company',symbol)!=symbol else symbol
+    cols=st.columns([3,2])
+    selected=cols[0].selectbox('Stock name / symbol — type to search',symbols,format_func=labels,key='fast_stock_selected')
+    manual=cols[1].text_input('Or enter an NSE symbol',placeholder='Example: ITC',key='fast_stock_manual')
+    symbol=(manual.strip() or selected).upper().removesuffix('.NS')
+    if not re.fullmatch(r'[A-Z0-9&._-]+',symbol):st.error('Enter a valid NSE symbol.');return
+    if st.button('Update this stock’s prices',type='primary',key='fast_stock_update'):
+        with store['lock']:
+            with loading_stopwatch('Updating '+symbol+'…'):
+                try:
+                    notice=fast_percentage_update(store,[symbol])
+                    if notice:st.warning(notice)
+                except Exception as exc:st.error('Update failed; saved prices retained. '+str(exc))
+    with store['lock']:
+        record=store['records'].get(symbol,{}).get('record',{})
+        returns=fast_stock_returns(record)
+        company=store['meta'].get(symbol,{}).get('company',symbol)
+    if not record.get('closes'):
+        st.info('No saved prices for '+symbol+'. Click Update this stock’s prices once.');return
+    st.markdown('#### '+html.escape(str(company))+' ('+html.escape(symbol)+')')
+    cards=[]
+    for period,value in returns.items():
+        available=pd.notna(value) and np.isfinite(float(value))
+        colour='#166534' if available and value>0 else '#b91c1c' if available and value<0 else '#475569'
+        background='#dcfce7' if available and value>0 else '#fee2e2' if available and value<0 else '#f1f5f9'
+        display=f'{value:+.2f}%' if available else '—'
+        cards.append(f'<div style="background:{background};color:{colour};padding:12px 6px;border-radius:8px;text-align:center"><div style="font-size:12px">{period}</div><div style="font-size:19px;font-weight:700;margin-top:5px">{display}</div></div>')
+    st.markdown('<style>.fast-stock-returns{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px}@media(max-width:900px){.fast-stock-returns{grid-template-columns:repeat(4,minmax(0,1fr))}}@media(max-width:480px){.fast-stock-returns{grid-template-columns:repeat(2,minmax(0,1fr))}}</style><div class="fast-stock-returns">'+''.join(cards)+'</div>',unsafe_allow_html=True)
+    last=record['closes'][-1]
+    stamp=pd.to_datetime(last[0],errors='coerce')
+    st.caption('Latest saved close: ₹'+format(float(last[1]),',.2f')+' · '+(stamp.strftime('%d/%m/%Y') if pd.notna(stamp) else 'Date unavailable'))
+    st.caption('Each return compares the latest saved close with the close 1, 5, 10, 21, 63, 126, 252 or 504 trading sessions earlier. — means insufficient history. Green = gain; red = loss. Prices remain saved until you update them.')
+    rows=[{'Stock':symbol,'Period':period,'Change %':value,'Price Date':last[0]} for period,value in returns.items()]
+    st.download_button('Download this stock’s returns',pd.DataFrame(rows).to_csv(index=False),symbol+'_fast_returns.csv','text/csv',key='fast_stock_csv')
+
+
 def render_fast_percentage():
-    st.markdown('## ⚡ Fast — By Percentage')
+    st.markdown('## ⚡ Fast')
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
     store=fast_percentage_store()
     fast_restore_settings(store)
     fast_percentage_ensure_periods(store)
+    view=st.radio('View',['By Percentage','By Stock'],horizontal=True,key='fast_view')
+    if view=='By Stock':
+        render_fast_by_stock(store);return
     controls=st.columns([2,2,1,1])
     group=controls[0].selectbox('Universe',['All NSE','NIFTY 50','NIFTY 100','NIFTY 500','NIFTY Midcap','NIFTY Smallcap'],key='fast_universe',on_change=fast_save_settings)
     period=controls[1].selectbox('Trading period',list(FAST_PERCENT_PERIODS),key='fast_period',on_change=fast_save_settings)
