@@ -2573,13 +2573,14 @@ def render_fast_by_stock(store):
         colour='#166534' if available and value>0 else '#b91c1c' if available and value<0 else '#475569'
         background='#dcfce7' if available and value>0 else '#fee2e2' if available and value<0 else '#f1f5f9'
         display=f'{value:+.2f}%' if available else '—'
-        cards.append(f'<div style="background:{background};color:{colour};padding:12px 6px;border-radius:8px;text-align:center"><div style="font-size:12px">{period}</div><div style="font-size:19px;font-weight:700;margin-top:5px">{display}</div></div>')
+        price_pair=fast_percentage_price_pair(record['closes'][-1][1],value) if available else '—'
+        cards.append(f'<div style="background:{background};color:{colour};padding:12px 6px;border-radius:8px;text-align:center"><div style="font-size:12px">{period}</div><div style="font-size:19px;font-weight:700;margin-top:5px">{display}</div><div style="font-size:11px;margin-top:6px;overflow-wrap:anywhere">{html.escape(price_pair)}</div></div>')
     st.markdown('<style>.fast-stock-returns{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px}@media(max-width:900px){.fast-stock-returns{grid-template-columns:repeat(4,minmax(0,1fr))}}@media(max-width:480px){.fast-stock-returns{grid-template-columns:repeat(2,minmax(0,1fr))}}</style><div class="fast-stock-returns">'+''.join(cards)+'</div>',unsafe_allow_html=True)
     last=record['closes'][-1]
     stamp=pd.to_datetime(last[0],errors='coerce')
     st.caption('Latest saved close: ₹'+format(float(last[1]),',.2f')+' · '+(stamp.strftime('%d/%m/%Y') if pd.notna(stamp) else 'Date unavailable'))
     st.caption('Each return compares the latest saved close with the close 1, 5, 10, 21, 63, 126, 252 or 504 trading sessions earlier. — means insufficient history. Green = gain; red = loss. Prices remain saved until you update them.')
-    rows=[{'Stock':symbol,'Period':period,'Change %':value,'Price Date':last[0]} for period,value in returns.items()]
+    rows=[{'Stock':symbol,'Period':period,'Change %':value,'Price':fast_percentage_price_pair(last[1],value) if pd.notna(value) else '—','Price Date':last[0]} for period,value in returns.items()]
     st.download_button('Download this stock’s returns',pd.DataFrame(rows).to_csv(index=False),symbol+'_fast_returns.csv','text/csv',key='fast_stock_csv')
 
 
