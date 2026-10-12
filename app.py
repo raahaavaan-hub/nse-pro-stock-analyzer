@@ -3245,11 +3245,11 @@ def dashboard_market_save(state):
 
 def dashboard_market_series(card,quotes):
     source=quotes.get(card['Symbol'],[])
-    if not source:return pd.Series(dtype=float)
+    if not source:return pd.Series(dtype=float,index=pd.DatetimeIndex([]))
     raw=pd.Series({pd.Timestamp(day):float(value) for day,value in source}).sort_index()
     if card['Display'] in ['Gold ₹/gram','Silver ₹/kg']:
         fx_source=quotes.get('INR=X',[])
-        if not fx_source:return pd.Series(dtype=float)
+        if not fx_source:return pd.Series(dtype=float,index=pd.DatetimeIndex([]))
         fx=pd.Series({pd.Timestamp(day):float(value) for day,value in fx_source}).sort_index()
         combined=fx.reindex(fx.index.union(raw.index)).sort_index().ffill()
         # Reject conversions without an FX observation in the preceding seven days.
@@ -3351,7 +3351,7 @@ def render_market_dashboard():
         for col,card in zip(columns,cards[offset:offset+4]):
             with col:
                 series=dashboard_market_series(card,quotes)
-                series=series[series.index<=pd.Timestamp(selected)]
+                if not series.empty:series=series[series.index<=pd.Timestamp(selected)]
                 unit='₹/gram' if card['Display']=='Gold ₹/gram' else '₹/kg' if card['Display']=='Silver ₹/kg' else '₹/coin' if card['Display']=='Crypto INR' else '₹' if card['Display']=='INR' else 'points'
                 if series.empty:
                     st.markdown('**'+html.escape(card['Name'])+'**');st.caption('Price unavailable · '+unit);continue
