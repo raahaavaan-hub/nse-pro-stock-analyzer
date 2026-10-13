@@ -3284,8 +3284,22 @@ def dashboard_move_date(delta):
     st.session_state['dashboard_date']=min(today,st.session_state.get('dashboard_date',today)+timedelta(days=delta))
 
 
-def dashboard_crypto_current(symbol):
-    if symbol.upper()=='CG:BELDEX':
+def dashboard_crypto_current(symbol, prefer_koinbx=True):
+    if symbol.upper()=='CG:BELDEX' and prefer_koinbx:
+        try:
+            return dashboard_crypto_koinbx()
+        except Exception:
+            return dashboard_crypto_current(symbol, prefer_koinbx=False)
+    coin=symbol.split(':',1)[1].lower()
+    response=requests.get('https://api.coingecko.com/api/v3/simple/price',params={'ids':coin,'vs_currencies':'inr','include_24hr_change':'true','include_last_updated_at':'true'},headers=HEADERS,timeout=(5,15))
+    response.raise_for_status();data=response.json().get(coin,{})
+    price=float(data.get('inr',0));updated=int(data.get('last_updated_at',0))
+    if not np.isfinite(price) or price<=0 or updated<=0:raise ValueError('Current crypto quote unavailable.')
+    change=data.get('inr_24h_change')
+    return {'price':price,'change':float(change) if change is not None and np.isfinite(float(change)) else None,'updated':updated,'source':'CoinGecko'}
+
+def dashboard_crypto_koinbx():
+    if True:
         response=requests.get('https://api.koinbx.com/markets',headers=HEADERS,timeout=(5,15))
         response.raise_for_status()
         market=next((row for row in response.json().get('markets',[]) if str(row.get('trading_pairs','')).upper()=='BDX_INR'),None)
@@ -3297,13 +3311,6 @@ def dashboard_crypto_current(symbol):
         if change is not None and not np.isfinite(change):change=None
         # Public markets endpoint supplies no exchange quote timestamp.
         return {'price':price,'change':change,'updated':int(datetime.now(ZoneInfo('Asia/Kolkata')).timestamp()),'source':'KoinBX BDX/INR','timestamp_kind':'retrieved'}
-    coin=symbol.split(':',1)[1].lower()
-    response=requests.get('https://api.coingecko.com/api/v3/simple/price',params={'ids':coin,'vs_currencies':'inr','include_24hr_change':'true','include_last_updated_at':'true'},headers=HEADERS,timeout=(5,15))
-    response.raise_for_status();data=response.json().get(coin,{})
-    price=float(data.get('inr',0));updated=int(data.get('last_updated_at',0))
-    if not np.isfinite(price) or price<=0 or updated<=0:raise ValueError('Current crypto quote missing price or update time.')
-    change=data.get('inr_24h_change')
-    return {'price':price,'change':float(change) if change is not None and np.isfinite(float(change)) else None,'updated':updated}
 
 
 def dashboard_crypto_snapshot(symbol,selected):
@@ -3525,8 +3532,8 @@ def render_market_dashboard():
                 series=dashboard_market_series(card,quotes)
                 if not series.empty:series=series[series.index<=pd.Timestamp(selected)]
                 live=crypto_live.get(card['Symbol']) if selected==today and card['Display']=='Crypto INR' else None
-                if card['Symbol']=='CG:BELDEX' and selected==today and (not live or live.get('source')!='KoinBX BDX/INR'):
-                    st.markdown('**'+html.escape(card['Name'])+'**');st.caption('KoinBX price not loaded — click Refresh market prices.');st.link_button('Open KoinBX BDX/INR','https://koinbx.com/trade/BDX-INR');continue
+                if card['Symbol']=='CG:BELDEX' and selected==today and not live:
+                    st.markdown('**'+html.escape(card['Name'])+'**');st.caption('Beldex price not loaded — click Refresh market prices.');st.link_button('Open KoinBX BDX/INR','https://koinbx.com/trade/BDX-INR');continue
                 if live:
                     updated=datetime.fromtimestamp(live['updated'],ZoneInfo('Asia/Kolkata'))
                     series=pd.Series([live['price']],index=pd.DatetimeIndex([pd.Timestamp(updated.date())]))
@@ -3547,7 +3554,7 @@ def render_market_dashboard():
                 elif card['Display']=='Crypto INR' and selected==today:st.caption('Historical snapshot — current quote not loaded.')
                 if (pd.Timestamp(selected)-series.index[-1]).days>7:st.caption('Older saved price — refresh this date.')
     render_portfolio_dashboard()
-    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Today’s Beldex uses KoinBX BDX/INR last-traded price and 24-hour change; its time is retrieval time. Other crypto and past-date crypto snapshots use CoinGecko (UTC reference), not KoinBX historical prices. SilverBeES is ₹ per ETF unit, not silver per kg; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
+    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Today’s Beldex tries KoinBX BDX/INR first, then CoinGecko if KoinBX is unavailable; the displayed source identifies the quote. KoinBX time is retrieval time. Other crypto and past-date crypto snapshots use CoinGecko (UTC reference), not KoinBX historical prices. SilverBeES is ₹ per ETF unit, not silver per kg; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
 
 
 if page=="🏠 Dashboard":
