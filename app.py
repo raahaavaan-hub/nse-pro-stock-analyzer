@@ -3285,6 +3285,18 @@ def dashboard_move_date(delta):
 
 
 def dashboard_crypto_current(symbol):
+    if symbol.upper()=='CG:BELDEX':
+        response=requests.get('https://api.koinbx.com/markets',headers=HEADERS,timeout=(5,15))
+        response.raise_for_status()
+        market=next((row for row in response.json().get('markets',[]) if str(row.get('trading_pairs','')).upper()=='BDX_INR'),None)
+        if not market:raise ValueError('KoinBX BDX/INR quote unavailable.')
+        price=float(market.get('last_price',0))
+        if not np.isfinite(price) or price<=0:raise ValueError('KoinBX BDX/INR price invalid.')
+        raw=market.get('price_change_percent_24h')
+        change=float(raw) if raw is not None else None
+        if change is not None and not np.isfinite(change):change=None
+        # Public markets endpoint supplies no exchange quote timestamp.
+        return {'price':price,'change':change,'updated':int(datetime.now(ZoneInfo('Asia/Kolkata')).timestamp()),'source':'KoinBX BDX/INR','timestamp_kind':'retrieved'}
     coin=symbol.split(':',1)[1].lower()
     response=requests.get('https://api.coingecko.com/api/v3/simple/price',params={'ids':coin,'vs_currencies':'inr','include_24hr_change':'true','include_last_updated_at':'true'},headers=HEADERS,timeout=(5,15))
     response.raise_for_status();data=response.json().get(coin,{})
@@ -3513,6 +3525,8 @@ def render_market_dashboard():
                 series=dashboard_market_series(card,quotes)
                 if not series.empty:series=series[series.index<=pd.Timestamp(selected)]
                 live=crypto_live.get(card['Symbol']) if selected==today and card['Display']=='Crypto INR' else None
+                if card['Symbol']=='CG:BELDEX' and selected==today and (not live or live.get('source')!='KoinBX BDX/INR'):
+                    st.markdown('**'+html.escape(card['Name'])+'**');st.caption('KoinBX price not loaded — click Refresh market prices.');st.link_button('Open KoinBX BDX/INR','https://koinbx.com/trade/BDX-INR');continue
                 if live:
                     updated=datetime.fromtimestamp(live['updated'],ZoneInfo('Asia/Kolkata'))
                     series=pd.Series([live['price']],index=pd.DatetimeIndex([pd.Timestamp(updated.date())]))
@@ -3527,12 +3541,13 @@ def render_market_dashboard():
                 st.metric(card['Name'],value,f'{change:+.2f}%' if pd.notna(change) else None)
                 st.caption(series.index[-1].strftime('%d/%m/%Y')+' · '+('₹/ETF unit' if card['Symbol']=='SILVERBEES.NS' else unit)+' · '+card['Symbol'])
                 if live:
-                    st.caption('CoinGecko quote: '+updated.strftime('%d/%m/%Y %I:%M %p IST')+' · change over 24 hours')
+                    st.caption(('KoinBX BDX/INR · retrieved: ' if live.get('source')=='KoinBX BDX/INR' else 'CoinGecko quote: ')+updated.strftime('%d/%m/%Y %I:%M %p IST')+' · change over 24 hours')
+                    if live.get('source')=='KoinBX BDX/INR':st.link_button('KoinBX BDX/INR','https://koinbx.com/trade/BDX-INR')
                     if (now-updated).total_seconds()>900:st.caption('Saved quote is older than 15 minutes — click Refresh market prices.')
                 elif card['Display']=='Crypto INR' and selected==today:st.caption('Historical snapshot — current quote not loaded.')
                 if (pd.Timestamp(selected)-series.index[-1]).days>7:st.caption('Older saved price — refresh this date.')
     render_portfolio_dashboard()
-    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Today’s crypto uses CoinGecko current INR quotes with source update time and 24-hour change; past dates use historical snapshots (UTC reference). SilverBeES is ₹ per ETF unit, not silver per kg; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
+    st.caption('Gold and silver: international futures benchmarks converted with USD/INR to ₹/gram and ₹/kg. Not local retail or purity-certified jewellery prices; excludes GST, duties, premiums and making charges. FX uses the same date or latest preceding observation within seven days. Today’s Beldex uses KoinBX BDX/INR last-traded price and 24-hour change; its time is retrieval time. Other crypto and past-date crypto snapshots use CoinGecko (UTC reference), not KoinBX historical prices. SilverBeES is ₹ per ETF unit, not silver per kg; availability depends on provider access. Overseas indices remain points. On non-trading days, the actual earlier price date is shown. Daily change compares the latest two available closes.')
 
 
 if page=="🏠 Dashboard":
