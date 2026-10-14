@@ -2675,6 +2675,173 @@ def mc_quote(symbol,event_date):
     dates=[pd.Timestamp(v).date() for v in h.index];close=pd.to_numeric(h['Close'],errors='coerce');prior=[i for i,d in enumerate(dates) if d<day and pd.notna(close.iloc[i])];same=[i for i,d in enumerate(dates) if d==day and pd.notna(close.iloc[i])];valid=[i for i in range(len(dates)) if pd.notna(close.iloc[i])]
     return {'before':float(close.iloc[prior[-1]]) if prior else None,'before_date':dates[prior[-1]] if prior else None,'event':float(close.iloc[same[-1]]) if same else None,'latest':float(close.iloc[valid[-1]]) if valid else None,'latest_date':dates[valid[-1]] if valid else None}
 
+MC_BROKERS=['Jefferies','Motilal Oswal','Morgan Stanley','Goldman Sachs','JPMorgan','Nomura','CLSA','ICICI Securities','HDFC Securities','Axis Securities','JM Financial','Nuvama','Kotak Institutional Equities','Emkay','Elara','UBS','Citi','HSBC','IIFL','BOFA Securities','Bernstein']
+
+def mc_clean_name(value):
+    return ' '.join(re.sub(r'[^a-z0-9 ]',' ',str(value).lower()).split())
+
+def mc_match_symbols(text,companies):
+    text=' '+mc_clean_name(text)+' ';matched=[]
+    for symbol,company in companies.items():
+        name=re.sub(r'\b(limited|ltd|private|pvt)\b','',mc_clean_name(company)).strip();name=' '.join(name.split())
+        phrases=[mc_clean_name(symbol),name]
+        words=name.split()
+        if len(words)>=2:phrases.append(' '.join(words[:2]))
+        if any(len(p)>=4 and ' '+p+' ' in text for p in phrases if p):matched.append(symbol)
+    return matched
+
+def mc_fetch_broker_month(start,end,companies):
+    from concurrent.futures import ThreadPoolExecutor,as_completed
+    def fetch(broker):
+        term='"'+broker+'" ("target price" OR upgrade OR downgrade OR "buy rating" OR "sell rating" OR overweight OR underweight) India after:'+(start-timedelta(days=1)).isoformat()+' before:'+(end+timedelta(days=2)).isoformat()
+        url='https://news.google.com/rss/search?q='+quote_plus(term)+'&hl=en-IN&gl=IN&ceid=IN:en'
+        response=requests.get(url,headers=HEADERS,timeout=(5,12));response.raise_for_status();root=ET.fromstring(response.content);rows=[]
+        for item in root.findall('.//item'):
+            title=html.unescape(item.findtext('title') or '');description=re.sub('<[^>]+>',' ',html.unescape(item.findtext('description') or ''));text=title+' '+description
+            if mc_clean_name(broker) not in mc_clean_name(text):continue
+            if not re.search(r'target|upgrade|downgrade|\bbuy\b|\bsell\b|overweight|underweight|rating',text,re.I):continue
+            day=mc_date(item.findtext('pubDate'))
+            if not day or not (start-timedelta(days=1)).isoformat()<=day<=(end+timedelta(days=1)).isoformat():continue
+            source=item.find('source');source=source.text if source is not None else ''
+            symbols=mc_match_symbols(text,companies)
+            # Unmatched reports remain visible; never guess a stock assignment.
+            for symbol in symbols or ['']:
+                rows.append({'Date':day,'Broker':broker,'Symbol':symbol,'Headline':title,'Publisher':source,'Link':item.findtext('link') or ''})
+        return rows
+    output=[];errors=[]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures={pool.submit(fetch,b):b for b in MC_BROKERS}
+        for future in as_completed(futures):
+            try:output.extend(future.result())
+            except Exception as exc:errors.append(futures[future]+': '+str(exc))
+    if len(errors)==len(MC_BROKERS):raise ValueError('All brokerage news requests failed.')
+    unique={(r['Date'],r['Broker'],r['Symbol'],r['Link'] or r['Headline']):r for r in output}
+    return {'rows':list(unique.values()),'errors':errors,'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()}
+
+def mc_broker_names(event,calls):
+    day=datetime.fromisoformat(event['Date']).date()
+    return sorted({r['Broker'] for r in calls if r['Symbol']==event['Symbol'] and abs((datetime.fromisoformat(r['Date']).date()-day).days)<=1})
+
+@st.cache_data(ttl=180,show_spinner=False)
+def mc_batch_prices(events_tuple):
+    events=[{'Symbol':s,'Date':d} for s,d in events_tuple];symbols=sorted({e['Symbol'] for e in events if e['Symbol']});today=datetime.now(ZoneInfo('Asia/Kolkata')).date();first=min([datetime.fromisoformat(e['Date']).date() for e in events]+[today])-timedelta(days=12)
+    histories={};errors=[]
+    for offset in range(0,len(symbols),60):
+        group=symbols[offset:offset+60];tickers=[s+'.NS' for s in group]
+        try:
+            frame=yf.download(tickers,start=first,end=today+timedelta(days=1),auto_adjust=False,group_by='ticker',threads=True,progress=False,timeout=15)
+            for symbol,ticker in zip(group,tickers):
+                try:
+                    if isinstance(frame.columns,pd.MultiIndex):
+                        if ticker in frame.columns.get_level_values(0):part=frame[ticker]
+                        else:part=frame.xs(ticker,axis=1,level=1)
+                    else:part=frame
+                    close=pd.to_numeric(part['Close'],errors='coerce').dropna()
+                    if not close.empty:histories[symbol]=[(pd.Timestamp(i).date(),float(v)) for i,v in close.items()]
+                except Exception:errors.append(symbol)
+        except Exception:errors.extend(group)
+    output={}
+    for event in events:
+        points=histories.get(event['Symbol'],[]);day=datetime.fromisoformat(event['Date']).date();prior=[v for v in points if v[0]<day];same=[v for v in points if v[0]==day]
+        if not points:continue
+        before=prior[-1][1] if prior else None;latest=points[-1][1]
+        output[event['Symbol']+'|'+event['Date']]={'before':before,'event':same[-1][1] if same else None,'latest':latest,'latest_date':points[-1][0].isoformat(),'change':(latest/before-1)*100 if before and day<=today else None}
+    return {'prices':output,'errors':sorted(set(errors)),'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()}
+
+def mc_card_html(event,quote,brokers,deals):
+    q=quote or {};change=q.get('change');colour='#31d47b' if change is not None and change>0 else '#ff7777' if change is not None and change<0 else '#edf4f8'
+    def esc(value):return html.escape(str(value))
+    def price(value):return '₹'+dashboard_indian_price(value) if value is not None else 'Unavailable'
+    def link(url):return url if str(url).startswith(('https://','http://')) else ''
+    names=' · '.join(brokers) if brokers else 'No matching sourced call'
+    pct=(' ('+f'{change:+.2f}'+'%)') if change is not None else ''
+    deal_types=sorted({r.get('Deal Type','') for r in deals if r.get('Symbol')==event['Symbol'] and r.get('Date')==event['Date']})
+    return '<article class="mc-card"><div class="mc-meta">'+esc(event['Date'].split('-')[::-1][0]+'/'+event['Date'][5:7]+'/'+event['Date'][:4]+' · '+event['Event'])+'</div><div class="mc-heading"><h3 style="color:'+colour+'">'+esc(event['Company']+' ('+event['Symbol']+')')+'</h3><span class="mc-brokers">'+esc(names)+'</span></div><p>'+esc(event.get('Details',''))+'</p><div class="mc-prices"><div><small>Before-event close</small><b>'+esc(price(q.get('before')))+'</b></div><div><small>Event-day close</small><b>'+esc(price(q.get('event')))+'</b></div><div><small>Latest available close</small><b style="color:'+colour+'">'+esc(price(q.get('latest'))+pct)+'</b></div></div><div class="mc-meta">'+esc(('Price date '+q.get('latest_date','').split('-')[::-1][0]+'/'+q.get('latest_date','')[5:7]+'/'+q.get('latest_date','')[:4]+' · Yahoo Finance closing prices') if q.get('latest_date') else 'Price unavailable; no guessed percentage')+((' · '+esc('/'.join(deal_types))+' deal on event date') if deal_types else '')+' · <a href="'+esc(link(event.get('Source','')))+'" target="_blank" rel="noopener">Event source ↗</a></div></article>'
+
+def mc_render_colour_news(data,start,end,prefix,query,refresh):
+    import calendar
+    from datetime import date as Date
+    all_events=data['rows'];companies={r['Symbol']:r['Company'] for r in all_events if r['Symbol']}
+    bkey='colour-brokers:'+prefix;bdata=mc_cache_read(bkey);dkey='deals:'+prefix;ddata=mc_cache_read(dkey)
+    # Fetch only this isolated view's month; existing scanners keep their own caches.
+    with loading_stopwatch('Updating brokerage coverage and deal panel…'):
+        if refresh or mc_needs_update(bdata):
+            try:bdata=mc_fetch_broker_month(start,end,companies);mc_cache_write(bkey,bdata)
+            except Exception as exc:st.warning('Brokerage update failed: '+str(exc))
+        if refresh or mc_needs_update(ddata):
+            deals=[];failures=[];today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+            if start<=today:
+                for kind in ['Bulk','Block']:
+                    try:deals.extend(deals_fetch(start,min(end,today),kind))
+                    except Exception as exc:failures.append(kind+': '+str(exc))
+                if len(failures)<2:
+                    if failures and ddata:deals.extend(ddata['rows'])
+                    unique={tuple(str(r.get(k,'')) for k in ['Date','Symbol','Client','Action','Quantity','Avg Price','Deal Type']):r for r in deals}
+                    ddata={'rows':list(unique.values()),'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'errors':failures};mc_cache_write(dkey,ddata)
+                for error in failures:st.warning('Deal panel: '+error)
+    calls=(bdata or {}).get('rows',[]);deals=(ddata or {}).get('rows',[])
+    filtered=[r for r in all_events if not query or query in (r['Company']+' '+r['Symbol']).lower()]
+    typ=st.selectbox('Event type',['All','Scheduled results','Board meeting','Results announcement'],key='mc_type')
+    if typ!='All':filtered=[r for r in filtered if r['Event']==typ]
+    month_calls=[c for c in calls if c['Date'].startswith(prefix)]
+    st.markdown('<style>.mc-summary{display:flex;gap:12px;margin:12px 0}.mc-summary span{padding:12px 18px;background:#142a36;border:1px solid #2d5363;border-radius:12px;color:#87e8bb;font-weight:700}.mc-card{padding:15px 18px;margin:10px 0;background:#14212d;border:1px solid #2c4150;border-radius:12px;color:#edf4f8}.mc-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.mc-heading h3{font-size:18px;margin:7px 0}.mc-brokers{color:#d6c3ff;font-size:12px}.mc-card p{font-size:12px;line-height:1.5;margin:5px 0 10px}.mc-meta{color:#afc1cf;font-size:11px}.mc-prices{display:flex;gap:28px;flex-wrap:wrap;background:#0c141d;padding:12px;border-radius:9px;margin:9px 0}.mc-prices small{display:block;color:#a7bac8;font-size:11px}.mc-prices b{font-size:17px}.mc-card a{color:#87e8bb}.mc-panel{background:#14212d;padding:12px;border-radius:12px;color:#edf4f8;border:1px solid #2c4150}.mc-panel h4{margin:4px 0 12px}.mc-panel p{font-size:12px;margin:5px 0}.st-key-mc_calendar button{background:#0c141d;border:1px solid #2c5364;min-height:76px;border-radius:10px;color:#a5ebc5}.st-key-mc_calendar button p{white-space:pre-line;font-size:12px}.st-key-mc_calendar button:hover{border-color:#87e8bb}.st-key-mc_calendar [data-testid="stHorizontalBlock"]{gap:6px}.st-key-mc_calendar [data-testid="stVerticalBlock"]{gap:6px}@media(max-width:600px){.mc-heading h3{font-size:15px}.mc-prices{gap:14px}.mc-prices b{font-size:14px}}</style>',unsafe_allow_html=True)
+    st.markdown('<div class="mc-summary"><span>'+str(len(filtered))+' events this month</span><span>'+str(len(month_calls))+' sourced call mentions</span></div>',unsafe_allow_html=True)
+    st.caption('Brokerage coverage: public news only, partial · '+('Fetched '+str(bdata['updated']) if bdata else 'Not loaded'))
+    if bdata and bdata.get('errors'):st.caption(str(len(bdata['errors']))+' brokerage requests failed; counts may be incomplete.')
+    left,right=st.columns([3,1])
+    selected=st.session_state.get('mc_selected',datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat())
+    if not selected.startswith(prefix):selected=start.isoformat()
+    with left:
+        with st.container(key='mc_calendar'):
+            st.markdown('#### '+calendar.month_name[start.month]+' '+str(start.year))
+            for col,label in zip(st.columns(7),['Sun','Mon','Tue','Wed','Thu','Fri','Sat']):col.caption(label)
+            for week in calendar.Calendar(firstweekday=6).monthdayscalendar(start.year,start.month):
+                for col,day in zip(st.columns(7),week):
+                    if day:
+                        key=Date(start.year,start.month,day).isoformat();ec=sum(r['Date']==key for r in filtered);bc=sum(r['Date']==key for r in month_calls)
+                        if col.button(str(day)+'\n'+str(ec)+' events\n'+str(bc)+' calls',key='mc_day_'+key,type='primary' if key==selected else 'secondary',use_container_width=True):selected=key;st.session_state['mc_selected']=key;st.rerun()
+    with right:
+        st.markdown('#### Bulk & Block Deals');st.caption(Date.fromisoformat(selected).strftime('%d/%m/%Y'))
+        day_deals=[r for r in deals if r['Date']==selected]
+        panel='<div class="mc-panel">'
+        for kind,colour in [('Bulk','#87e8bb'),('Block','#ff9696')]:
+            panel+='<h4 style="color:'+colour+'">'+kind+' deals</h4>';counts={}
+            for r in day_deals:
+                if r['Deal Type']==kind:counts[r['Symbol']]=counts.get(r['Symbol'],0)+1
+            panel+=''.join('<p style="color:'+colour+'">'+html.escape(companies.get(symbol,symbol))+' ('+html.escape(symbol)+') × '+str(count)+'</p>' for symbol,count in sorted(counts.items(),key=lambda x:-x[1])) or '<p>No loaded records</p>'
+        panel+='</div>';st.markdown(panel,unsafe_allow_html=True)
+        if ddata:st.caption('Reports fetched '+ddata['updated'])
+        st.link_button('NSE deal source','https://www.nseindia.com/report-detail/display-bulk-and-block-deals')
+    all_days=st.checkbox('Show entire month',key='mc_all_days');shown=filtered if all_days else [r for r in filtered if r['Date']==selected]
+    # One card per company/date/type; preserve every source detail in the combined text.
+    unique={}
+    for r in shown:
+        k=(r['Symbol'],r['Date'],r['Event'])
+        if k not in unique:unique[k]=dict(r)
+        elif r['Details'] not in unique[k]['Details']:unique[k]['Details']+=' · '+r['Details']
+    shown=list(unique.values());pairs=tuple(sorted({(r['Symbol'],r['Date']) for r in shown}));pkey='colour-prices:'+prefix+':'+str(__import__('hashlib').sha256(repr(pairs).encode()).hexdigest()[:16]);pdata=mc_cache_read(pkey)
+    if pairs and (refresh or mc_needs_update(pdata)):
+        with loading_stopwatch('Fetching prices for visible event stocks…'):
+            try:
+                if refresh:mc_batch_prices.clear()
+                fetched=mc_batch_prices(pairs)
+                if fetched['prices']:pdata=fetched;mc_cache_write(pkey,pdata)
+                if len(fetched['prices'])<len(pairs):st.warning('Some prices are unavailable. Those cards remain visible without guessed returns.')
+            except Exception as exc:st.warning('Price update failed: '+str(exc))
+    prices=(pdata or {}).get('prices',{})
+    def change(row):return prices.get(row['Symbol']+'|'+row['Date'],{}).get('change')
+    shown.sort(key=lambda row:(change(row) is None,-change(row) if change(row) is not None else 0,row['Company']))
+    st.markdown('### '+('Entire month' if all_days else Date.fromisoformat(selected).strftime('%d/%m/%Y')))
+    st.caption('Highest percentage gain first · latest close versus before-event close · green up / red down / white unchanged or unavailable')
+    if pdata:st.caption('Prices fetched '+pdata['updated'])
+    if not shown:st.info('No events loaded for this selection.')
+    page=st.number_input('Card page',min_value=1,max_value=max(1,(len(shown)+24)//25),value=1,key='mc_card_page_'+prefix+'_'+selected+'_'+str(all_days)) if len(shown)>25 else 1
+    for r in shown[(int(page)-1)*25:int(page)*25]:st.markdown(mc_card_html(r,prices.get(r['Symbol']+'|'+r['Date']),mc_broker_names(r,calls),deals),unsafe_allow_html=True)
+    st.caption('Broker names match sourced stock mentions within ±1 calendar day of the event. Unmatched articles are retained in Brokerage Calls. Future events have no realised event return.')
+    if shown:
+        frame=pd.DataFrame([{**r,'Brokerages':' · '.join(mc_broker_names(r,calls)),'Change %':change(r)} for r in shown]);frame['Date']=frame['Date'].map(lambda d:datetime.fromisoformat(d).strftime('%d/%m/%Y'));st.download_button('Download event list',frame.to_csv(index=False).encode(),'market_compass.csv','text/csv',key='mc_events_csv')
+
+
 def render_fast_market_compass():
     import calendar
     from datetime import date as Date
@@ -2704,31 +2871,7 @@ def render_fast_market_compass():
         st.caption('Source: '+data['origin']+' · fetched '+data['updated']+' · '+str(len(data['rows']))+' records')
         for error in data.get('errors',[]):st.warning('Partial coverage: '+error)
         st.link_button('Official NSE board meetings','https://www.nseindia.com/companies-listing/corporate-filings-board-meetings')
-        rows=[r for r in data['rows'] if not query or query in (r['Symbol']+' '+r['Company']).lower()]
-        typ=st.selectbox('Event type',['All','Scheduled results','Board meeting','Results announcement'],key='mc_type')
-        if typ!='All':rows=[r for r in rows if r['Event']==typ]
-        for week in calendar.Calendar(firstweekday=6).monthdayscalendar(int(year),month):
-            cols=st.columns(7)
-            for col,day in zip(cols,week):
-                if day:
-                    d=Date(int(year),month,day).isoformat();count=sum(r['Date']==d for r in rows)
-                    if col.button(str(day)+(' · '+str(count) if count else ''),key='mc_day_'+d,use_container_width=True):st.session_state['mc_selected']=d
-        selected=st.session_state.get('mc_selected',today.isoformat())
-        if not selected.startswith(prefix):selected=start.isoformat()
-        all_days=st.checkbox('Show entire month',key='mc_all_days')
-        st.caption('Calendar: Sun → Sat · numbers after dots are event counts')
-        shown=rows if all_days else [r for r in rows if r['Date']==selected]
-        st.markdown('**'+('Entire month' if all_days else Date.fromisoformat(selected).strftime('%d/%m/%Y'))+'**')
-        mc_show_table(sorted(shown,key=lambda r:(r['Date'],r['Symbol'])),'mc_events_csv')
-        if shown:
-            options=list(range(len(shown)))
-            i=st.selectbox('Stock prices around the event',options,format_func=lambda i:shown[i]['Symbol']+' · '+Date.fromisoformat(shown[i]['Date']).strftime('%d/%m/%Y'),key='mc_price_stock')
-            if st.button('Fetch selected stock prices',key='mc_prices'):
-                try:
-                    q=mc_quote(shown[i]['Symbol'],shown[i]['Date']);cols=st.columns(3)
-                    for col,label,value in zip(cols,['Previous trading close','Event-day close','Latest available close'],[q['before'],q['event'],q['latest']]):col.metric(label,'₹'+dashboard_indian_price(value) if value is not None else 'Unavailable')
-                    st.caption('Yahoo Finance · latest price date '+q['latest_date'].strftime('%d/%m/%Y')+' · closes, not guaranteed live ticks')
-                except Exception as exc:st.warning('Price request failed: '+str(exc))
+        mc_render_colour_news(data,start,end,prefix,query,refresh)
     elif mode=='🤝 Deals':
         key='deals:'+prefix;data=mc_cache_read(key)
         if refresh or mc_needs_update(data):
