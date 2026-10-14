@@ -2903,6 +2903,311 @@ def render_fast_market_compass():
             st.caption('News fetched '+data['updated']);rows=[r for r in data['rows'] if r['Date'] and start.isoformat()<=r['Date']<=end.isoformat() and (not query or query in r['Headline'].lower())];mc_show_table(rows,'mc_broker_csv')
 
 
+# US Fast is isolated: its widgets, cache, universes and settings never write NSE Fast data.
+USF_DEFAULTS={'usf_universe':'All NYSE + Nasdaq','usf_period':'1 Day','usf_direction':'Gainer','usf_threshold':0.0,'usf_min_cap':'','usf_max_cap':'','usf_sort':'Percentage Change','usf_order':'High → Low'}
+@st.cache_resource(show_spinner=False)
+def usf_store():
+    import sqlite3
+    folder=Path('.us_fast');folder.mkdir(exist_ok=True)
+    state={'path':str(folder/'data.sqlite3'),'lock':threading.RLock(),'records':{},'meta':{},'directory':[],'sp500':{},'settings':{},'compass':{}}
+    with sqlite3.connect(state['path']) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS data(key TEXT PRIMARY KEY,payload TEXT)')
+        for key,payload in db.execute('SELECT key,payload FROM data'):
+            try:state[key]=json.loads(payload)
+            except Exception:pass
+    return state
+
+def usf_save(state,*keys):
+    import sqlite3
+    with state['lock'],sqlite3.connect(state['path'],timeout=30) as db:
+        for key in keys:db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(key,json.dumps(state[key])))
+
+def usf_restore(state):
+    for key,default in USF_DEFAULTS.items():
+        if key not in st.session_state:
+            value=state['settings'].get(key,default)
+            if key=='usf_universe' and value not in ['All NYSE + Nasdaq','S&P 500','NYSE','Nasdaq']:value=default
+            if key=='usf_period' and value not in FAST_PERCENT_PERIODS:value=default
+            st.session_state[key]=value
+
+def usf_settings_changed():
+    state=usf_store();state['settings']={key:st.session_state.get(key,default) for key,default in USF_DEFAULTS.items()};usf_save(state,'settings')
+
+def usf_directory(state,force=False):
+    if state['directory'] and not force:return
+    frame=us_stock_directory();state['directory']=frame.to_dict('records')
+    try:state['sp500']=us_sp500_holdings()
+    except Exception as exc:st.warning('S&P 500 membership not refreshed: '+str(exc))
+    for row in state['directory']:
+        meta=state['meta'].setdefault(row['Ticker'],{});meta.update(company=row['Company'],exchange=row['Exchange'],symbol=row['Symbol'])
+        if row['Ticker'] in state['sp500']:meta['sector']=state['sp500'][row['Ticker']]
+    usf_save(state,'directory','sp500','meta')
+
+def usf_universe(state,name):
+    if name=='S&P 500':return sorted(state['sp500'])
+    return sorted({r['Ticker'] for r in state['directory'] if name=='All NYSE + Nasdaq' or r['Exchange']==name})
+
+def usf_update_prices(state,symbols,full=False):
+    progress=st.progress(0.0);label=st.empty();updated=0;missing=[]
+    # Refresh the short overlap for saved histories. Full rebuild is available for corrections.
+    groups={}
+    for symbol in symbols:
+        entry=state['records'].get(symbol,{});last=entry.get('record',{}).get('last_date')
+        start=(pd.Timestamp(last)-pd.Timedelta(days=7)).date().isoformat() if last and entry.get('full') and not full else None
+        groups.setdefault(start,[]).append(symbol)
+    done=0
+    try:
+        for start,group in groups.items():
+            for offset in range(0,len(group),60):
+                batch=group[offset:offset+60];opts={'start':start} if start else {'period':'5y'}
+                try:
+                    raw=yf.download(batch,interval='1d',auto_adjust=False,group_by='ticker',threads=4,progress=False,timeout=15,**opts)
+                    for symbol in batch:
+                        try:
+                            if isinstance(raw.columns,pd.MultiIndex):frame=raw[symbol] if symbol in raw.columns.get_level_values(0) else raw.xs(symbol,axis=1,level=1)
+                            else:frame=raw
+                            frame=frame.dropna(subset=['Close'])
+                            if frame.empty:missing.append(symbol);continue
+                            record=market_cache_merge(None,frame,datetime.now(ZoneInfo('Asia/Kolkata')).isoformat());record['ohlc']=[];record['volumes']=[]
+                            for stamp,row in frame.iterrows():
+                                values=[float(row[c]) for c in ['Open','High','Low','Close']]
+                                day=pd.Timestamp(stamp).date().isoformat()
+                                if all(np.isfinite(v) and v>0 for v in values):record['ohlc'].append([day,*values])
+                                volume=row.get('Volume')
+                                if volume is not None and pd.notna(volume):record['volumes'].append([day,int(volume)])
+                            state['records'][symbol]=fast_percentage_merge(None if full else state['records'].get(symbol),record,full=start is None);updated+=1
+                        except Exception:missing.append(symbol)
+                    usf_save(state,'records')
+                except Exception as exc:
+                    st.warning('US price batch failed; saved data retained: '+str(exc));missing.extend(batch)
+                done+=len(batch);progress.progress(done/max(len(symbols),1));label.caption(f'US stocks checked: {done:,}/{len(symbols):,} · {updated:,} updated')
+    finally:progress.empty();label.empty()
+    if missing:st.warning(f'{len(set(missing)):,} stocks returned no usable price data. Saved values remain; check the dates.')
+
+def usf_update_details(state,symbols):
+    from concurrent.futures import ThreadPoolExecutor,as_completed
+    def fetch(symbol):
+        info=yf.Ticker(symbol).info or {};data={'company':info.get('longName') or state['meta'].get(symbol,{}).get('company',symbol),'sector':info.get('sector','Unclassified'),'details_checked':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()}
+        for field,name in [('marketCap','cap'),('sharesOutstanding','shares'),('heldPercentInsiders','insiders'),('heldPercentInstitutions','institutions')]:
+            value=info.get(field)
+            if value is not None and np.isfinite(float(value)):data[name]=float(value)
+        return symbol,data
+    progress=st.progress(0.0);failed=0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures=[pool.submit(fetch,s) for s in symbols]
+        for i,f in enumerate(as_completed(futures)):
+            try:s,data=f.result();state['meta'].setdefault(s,{}).update(data)
+            except Exception:failed+=1
+            progress.progress((i+1)/max(len(futures),1))
+    progress.empty();usf_save(state,'meta')
+    if failed:st.warning(str(failed)+' company-detail requests failed; previous values retained.')
+
+def usf_rows(state,symbols,period):
+    rows=[]
+    for symbol in symbols:
+        record=state['records'].get(symbol,{}).get('record',{});meta=state['meta'].get(symbol,{})
+        if not record.get('closes'):continue
+        change=nse_percentage_return(record,period) if period in NSE_PERCENT_PERIODS else nse_sector_return(record,FAST_PERCENT_PERIODS[period])
+        latest=record['closes'][-1][1]
+        rows.append({'Symbol':symbol,'Stock Name':meta.get('company',symbol),'Price Date':record.get('last_date',''),'Change %':change,'Latest':latest,'Market Cap ($m)':meta.get('cap',np.nan)/1e6,'Total Shares':meta.get('shares',np.nan),'Period Traded Volume':fast_period_volume(record,period),'Membership':'S&P 500' if symbol in state['sp500'] else meta.get('exchange','Unavailable'),'Sector':meta.get('sector','Unclassified')})
+    return pd.DataFrame(rows)
+
+def usf_table(state,frame,period):
+    cols=['No.','Stock Name','Trend','Date','Change %','Price ($)','Market Cap ($m)','Total Shares','Period Traded Volume','Membership','Sector','Stock page']
+    body=[]
+    for i,row in frame.iterrows():
+        symbol=row['Symbol'];record=state['records'][symbol]['record'];change=float(row['Change %']);latest=float(row['Latest']);base=latest/(1+change/100) if change>-100 else None
+        colour='#36d98b' if change>0 else '#ff8383' if change<0 else '#edf4f8'
+        def esc(v):return html.escape(str(v))
+        cap=row['Market Cap ($m)'];link='https://finance.yahoo.com/quote/'+symbol+'/'
+        values=[str(i+1),esc(row['Stock Name']+' ('+symbol+')'),fast_percentage_trend_svg(record,period),esc(datetime.fromisoformat(row['Price Date']).strftime('%d/%m/%Y')),f'<b style="color:{colour}">{change:+.2f}%</b>',('$'+format(base,',.2f')+' → $'+format(latest,',.2f')) if base else 'Unavailable',format(cap,',.2f') if pd.notna(cap) else '—',fast_indian_share_format(row['Total Shares']),fast_indian_share_format(row['Period Traded Volume']),esc(row['Membership']),esc(row['Sector']),'<a href="'+esc(link)+'" target="_blank" rel="noopener">Yahoo ↗</a>']
+        body.append('<tr>'+''.join('<td>'+v+'</td>' for v in values)+'</tr>')
+    st.markdown('<style>.usf-table{overflow-x:auto}.usf-table table{width:100%;border-collapse:collapse;font-size:12px;background:#14212d;color:#edf4f8}.usf-table td,.usf-table th{text-align:center;padding:5px;border:1px solid #2b4252;overflow-wrap:anywhere}.usf-table th{background:#173e50}.usf-table svg{width:100px;max-width:100%;display:block;margin:auto}.usf-table a{color:#89deba}</style><div class="usf-table"><table><thead><tr>'+''.join('<th>'+html.escape(c)+'</th>' for c in cols)+'</tr></thead><tbody>'+''.join(body)+'</tbody></table></div>',unsafe_allow_html=True)
+
+@st.cache_data(ttl=180,show_spinner=False)
+def usf_chart(symbol,mode,selected,period):
+    if mode=='Date':opts={'start':selected,'end':(date.fromisoformat(selected)+timedelta(days=1)).isoformat(),'interval':'5m'}
+    else:
+        intervals={'1 Day':('5d','5m'),'1 Week':('5d','15m'),'1 Month':('1mo','60m'),'3 Months':('3mo','1d'),'6 Months':('6mo','1d'),'1 Year':('1y','1d'),'2 Years':('2y','1d'),'5 Years':('5y','1d')};span,interval=intervals[period];opts={'period':span,'interval':interval}
+    frame=yf.Ticker(symbol).history(auto_adjust=False,**opts)
+    if not frame.empty and opts['interval']!='1d':
+        idx=pd.DatetimeIndex(frame.index);idx=idx.tz_localize('America/New_York') if idx.tz is None else idx.tz_convert('America/New_York')
+        if mode=='Period' and period=='1 Day':frame=frame[idx.date==idx[-1].date()];idx=idx[idx.date==idx[-1].date()]
+        frame.index=idx.tz_convert('Asia/Kolkata')
+    return frame
+
+def render_usf_percentage(state):
+    try:usf_directory(state)
+    except Exception as exc:st.warning('US directory request failed: '+str(exc))
+    if not state['directory']:st.info('Click Reload US directory to retry.')
+    usf_restore(state)
+    c=st.columns([2,2,1,1]);group=c[0].selectbox('Universe',['All NYSE + Nasdaq','S&P 500','NYSE','Nasdaq'],key='usf_universe',on_change=usf_settings_changed);period=c[1].selectbox('Trading period',list(FAST_PERCENT_PERIODS),key='usf_period',on_change=usf_settings_changed);direction=c[2].selectbox('Show',['Gainer','Loser'],key='usf_direction',on_change=usf_settings_changed);threshold=c[3].number_input('Minimum move %',min_value=0.0,step=5.0,key='usf_threshold',on_change=usf_settings_changed)
+    c=st.columns(4);low=c[0].text_input('Min market cap ($ million)',key='usf_min_cap',on_change=usf_settings_changed);high=c[1].text_input('Max market cap ($ million)',key='usf_max_cap',on_change=usf_settings_changed);sort=c[2].selectbox('Sort by',['Percentage Change','Market Cap'],key='usf_sort',on_change=usf_settings_changed);order=c[3].selectbox('Order',['High → Low','Low → High'],key='usf_order',on_change=usf_settings_changed)
+    try:lo=float(low.replace(',','')) if low.strip() else None;hi=float(high.replace(',','')) if high.strip() else None
+    except ValueError:st.error('Enter numeric market-cap limits.');return
+    if (lo is not None and lo<0) or (hi is not None and hi<0) or (lo is not None and hi is not None and lo>hi):st.error('Check market-cap limits.');return
+    symbols=usf_universe(state,group);c=st.columns(3)
+    if c[0].button('Update US prices',type='primary',key='usf_update'):
+        with loading_stopwatch('Updating US Fast cache…'):usf_update_prices(state,symbols)
+    if c[1].button('Reload US directory',key='usf_dir'):
+        try:us_stock_directory.clear();us_sp500_holdings.clear();usf_directory(state,True);symbols=usf_universe(state,group)
+        except Exception as exc:st.warning(str(exc))
+    if c[2].button('Rebuild full price history',key='usf_full'):
+        with loading_stopwatch('Rebuilding five-year US histories…'):usf_update_prices(state,symbols,full=True)
+    st.caption(f'{len(symbols):,} listed symbols selected · first build downloads five years; later updates merge recent sessions. All NYSE/Nasdaq can take several minutes and providers may limit requests. ETFs/test symbols excluded; preferred shares and warrants can remain.')
+    frame=usf_rows(state,symbols,period)
+    if frame.empty:st.info('Click Update US prices once. No Indian cache is used.');return
+    result=nse_percentage_filter(frame,direction,threshold).copy();query=st.text_input('Find stock / sector',key='usf_search').lower()
+    if query:result=result[(result['Stock Name']+' '+result['Symbol']+' '+result['Sector']).str.lower().str.contains(query,regex=False)]
+    if st.button('Update cap / shares / sector for matching stocks',key='usf_meta'):
+        with loading_stopwatch('Fetching US company details…'):usf_update_details(state,list(result.Symbol));result=usf_rows(state,list(result.Symbol),period)
+    if lo is not None:result=result[result['Market Cap ($m)']>=lo]
+    if hi is not None:result=result[result['Market Cap ($m)']<=hi]
+    result=result.sort_values('Market Cap ($m)' if sort=='Market Cap' else 'Change %',ascending=order=='Low → High',na_position='last',kind='mergesort').reset_index(drop=True)
+    st.caption(f'{frame["Change %"].notna().sum():,}/{len(symbols):,} stocks have enough saved history · {len(result):,} matches. Shares use Indian comma grouping; prices/cap are US dollars. Market-cap filters exclude missing caps.')
+    if result.empty:st.info('No saved stocks match.');return
+    page=st.number_input('Result page · 50 stocks per page',min_value=1,max_value=max(1,(len(result)+49)//50),value=1,key='usf_page_'+group+'_'+period+'_'+str(len(result))) if len(result)>50 else 1
+    usf_table(state,result.iloc[(int(page)-1)*50:int(page)*50],period)
+    export=result.copy();export['Price Date']=pd.to_datetime(export['Price Date']).dt.strftime('%d/%m/%Y');st.download_button('Download US Fast results',export.to_csv(index=False),'us_fast.csv','text/csv',key='usf_csv')
+    with st.expander('Candlestick chart · separate date and period options'):
+        symbol=st.selectbox('Stock',list(result.Symbol),key='usf_chart_symbol');mode=st.radio('Chart mode',['Date','Period'],horizontal=True,key='usf_chart_mode');day=st.date_input('US trading date',datetime.now(ZoneInfo('America/New_York')).date(),format='DD/MM/YYYY',key='usf_chart_date');span=st.selectbox('Chart period',['1 Day','1 Week','1 Month','3 Months','6 Months','1 Year','2 Years','5 Years'],key='usf_chart_period')
+        if st.button('Load US candle chart',key='usf_chart_load'):
+            try:
+                data=usf_chart(symbol,mode,day.isoformat(),span)
+                if data.empty:st.info('No candles for this date/range; historical intraday access is limited.')
+                else:
+                    import plotly.graph_objects as go
+                    fig=go.Figure(go.Candlestick(x=data.index,open=data.Open,high=data.High,low=data.Low,close=data.Close,increasing_line_color='#22c55e',decreasing_line_color='#ef4444'));fig.update_layout(height=320,xaxis_rangeslider_visible=False,margin=dict(l=5,r=5,t=15,b=20),yaxis_title='$',xaxis_title='IST for intraday · US session dates for daily candles');st.plotly_chart(fig,use_container_width=True)
+            except Exception as exc:st.warning('Chart unavailable: '+str(exc))
+    st.caption('Period returns use saved daily closes and session counts, not calendar days. Latest price dates may precede today. US insider/institutional percentages are not Indian promoter/FII/DII categories.')
+
+@st.cache_data(ttl=600,show_spinner=False)
+def usf_earnings_day(day):
+    response=requests.get('https://api.nasdaq.com/api/calendar/earnings',params={'date':day},headers={'User-Agent':'Mozilla/5.0','Accept':'application/json,text/plain,*/*','Referer':'https://www.nasdaq.com/market-activity/earnings','Origin':'https://www.nasdaq.com'},timeout=(5,15));response.raise_for_status();payload=response.json()
+    data=payload.get('data')
+    if not isinstance(data,dict):raise ValueError('Nasdaq earnings data unavailable.')
+    rows=data.get('rows')
+    if not isinstance(rows,list):raise ValueError('Nasdaq did not provide records for this date.')
+    return [{'Date':day,'Symbol':str(r.get('symbol','')).replace('.','-'),'Company':str(r.get('name') or r.get('symbol','')),'Event':'Earnings','Details':str(r.get('time',''))+' · EPS forecast '+str(r.get('epsForecast','Not supplied')),'Session':str(r.get('time','Not supplied')),'Source':'https://www.nasdaq.com/market-activity/earnings?date='+day} for r in rows if r.get('symbol')]
+
+def usf_fetch_calendar(start,end):
+    from concurrent.futures import ThreadPoolExecutor,as_completed
+    days=[(start+timedelta(days=i)).isoformat() for i in range((end-start).days+1) if (start+timedelta(days=i)).weekday()<5];rows=[];errors=[];success=0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures={pool.submit(usf_earnings_day,d):d for d in days}
+        for f in as_completed(futures):
+            try:rows.extend(f.result());success+=1
+            except Exception:errors.append(futures[f])
+    if not success:raise ValueError('Nasdaq blocked or did not return this month. Try Update again or open the official earnings source.')
+    return {'rows':rows,'errors':errors,'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'source':'Nasdaq earnings calendar (dates may be estimated)'}
+
+@st.cache_data(ttl=1800,show_spinner=False)
+def usf_analyst_changes(symbol):
+    frame=yf.Ticker(symbol).get_upgrades_downgrades()
+    if frame is None or frame.empty:return []
+    rows=[]
+    for stamp,r in frame.iterrows():
+        t=pd.Timestamp(stamp);t=t.tz_localize('UTC') if t.tzinfo is None else t.tz_convert('UTC');day=t.tz_convert('America/New_York').date().isoformat()
+        rows.append({'Date':day,'Symbol':symbol,'Broker':str(r.get('Firm','Unknown')),'Rating':str(r.get('ToGrade','')),'Action':str(r.get('Action','')),'IST':t.tz_convert('Asia/Kolkata').strftime('%d/%m/%Y %H:%M IST'),'Source':'https://finance.yahoo.com/quote/'+symbol+'/analysis/'})
+    return rows
+
+@st.cache_data(ttl=180,show_spinner=False)
+def usf_event_prices(events):
+    # Same baseline definition as Market Compass, using US symbols without .NS.
+    out={}
+    for offset in range(0,len(events),60):
+        batch=events[offset:offset+60];tickers=sorted({s for s,d in batch});first=min(date.fromisoformat(d) for s,d in batch)-timedelta(days=12);today=datetime.now(ZoneInfo('America/New_York')).date();first=min(first,today-timedelta(days=12))
+        raw=yf.download(tickers,start=first,end=today+timedelta(days=1),auto_adjust=False,group_by='ticker',threads=4,progress=False,timeout=15)
+        for symbol,day in batch:
+            try:
+                if isinstance(raw.columns,pd.MultiIndex):frame=raw[symbol] if symbol in raw.columns.get_level_values(0) else raw.xs(symbol,axis=1,level=1)
+                else:frame=raw
+                close=pd.to_numeric(frame.Close,errors='coerce').dropna();points=[(pd.Timestamp(i).date(),float(v)) for i,v in close.items()];target=date.fromisoformat(day);before=[v for v in points if v[0]<target];on=[v for v in points if v[0]==target]
+                if not points:continue
+                base=before[-1][1] if before else None;last=points[-1][1];out[symbol+'|'+day]={'before':base,'event':on[-1][1] if on else None,'latest':last,'latest_date':points[-1][0].isoformat(),'change':(last/base-1)*100 if base and target<=today else None}
+            except Exception:pass
+    return out
+
+def render_usf_compass(state):
+    import calendar
+    from concurrent.futures import ThreadPoolExecutor,as_completed
+    today=datetime.now(ZoneInfo('America/New_York')).date();c=st.columns([1,2,1,3]);year=c[0].number_input('Year',2000,2100,today.year,key='usfc_year');month=c[1].selectbox('Month',list(range(1,13)),index=today.month-1,format_func=lambda m:calendar.month_name[m],key='usfc_month');update=c[2].button('↻ Update',key='usfc_update');query=c[3].text_input('Search US stock',key='usfc_search').lower()
+    start=date(int(year),month,1);end=date(int(year),month,calendar.monthrange(int(year),month)[1]);key=start.strftime('%Y-%m');data=state['compass'].get(key)
+    if update or data is None:
+        try:
+            with loading_stopwatch('Fetching US earnings calendar…'):
+                if update:usf_earnings_day.clear()
+                fresh=usf_fetch_calendar(start,end)
+                if data and fresh['errors']:
+                    old=[r for r in data['rows'] if r['Date'] in fresh['errors']];fresh['rows'].extend(old)
+                state['compass'][key]=data=fresh;usf_save(state,'compass')
+        except Exception as exc:st.warning('Calendar update failed: '+str(exc)+'. Any retained records are saved data.')
+    st.link_button('Official Nasdaq earnings calendar','https://www.nasdaq.com/market-activity/earnings')
+    if not data:st.info('No calendar data loaded yet. No sample events are invented.');return
+    if data.get('errors'):st.warning(str(len(data['errors']))+' trading dates could not be fetched. Calendar counts are partial.')
+    all_rows=data['rows'];rows=[r for r in all_rows if not query or query in (r['Company']+' '+r['Symbol']).lower()];selected=st.session_state.get('usfc_selected',today.isoformat())
+    if not selected.startswith(key):selected=start.isoformat()
+    calls=state['compass'].get('analyst:'+key,{}).get('rows',[])
+    st.caption(data['source']+' · fetched '+data['updated']+' · dates follow the US calendar; exact analyst timestamps are IST')
+    st.markdown('<style>.usfc-card{padding:15px;background:#14212d;border:1px solid #2b4656;border-radius:12px;margin:9px 0;color:#edf4f8}.usfc-card h3{font-size:18px;margin:5px 0}.usfc-meta{font-size:11px;color:#b1c5d2}.usfc-price{display:flex;gap:24px;background:#0c141d;padding:12px;border-radius:8px;flex-wrap:wrap}.usfc-price small{display:block;font-size:11px;color:#aec2cd}.usfc-brokers{float:right;color:#d6c3ff;font-size:12px}.st-key-usfc_calendar button{min-height:76px;background:#112631;border:1px solid #2f5364;color:#87e8bb}.st-key-usfc_calendar button p{white-space:pre-line;font-size:12px}.usfc-card a{color:#87e8bb}</style>',unsafe_allow_html=True)
+    st.markdown('**'+str(len(rows))+' earnings events · '+str(sum(r['Date'].startswith(key) for r in calls))+' loaded analyst changes this month**')
+    with st.container(key='usfc_calendar'):
+        for col,label in zip(st.columns(7),['Sun','Mon','Tue','Wed','Thu','Fri','Sat']):col.caption(label)
+        for week in calendar.Calendar(firstweekday=6).monthdayscalendar(int(year),month):
+            for col,day in zip(st.columns(7),week):
+                if day:
+                    d=date(int(year),month,day).isoformat();ec=sum(r['Date']==d for r in rows);bc=sum(r['Date']==d for r in calls)
+                    if col.button(str(day)+'\n'+str(ec)+' events\n'+str(bc)+' calls',key='usfc_day_'+d,type='primary' if d==selected else 'secondary',use_container_width=True):st.session_state['usfc_selected']=d;st.rerun()
+    whole=st.checkbox('Show entire month',key='usfc_whole');shown=rows if whole else [r for r in rows if r['Date']==selected];symbols=sorted({r['Symbol'] for r in shown})
+    c=st.columns(2);fetch_calls=c[0].button('Update analyst calls for displayed event stocks',key='usfc_calls');fetch_prices=c[1].button('Update displayed stock prices',key='usfc_prices')
+    queried=state['compass'].get('analyst:'+key,{}).get('loaded_symbols',[])
+    request_symbols=symbols if fetch_calls else [symbol for symbol in symbols if symbol not in queried]
+    if request_symbols:
+        loaded=[];failed_symbols=[];failures=0
+        with loading_stopwatch('Fetching US analyst changes…'):
+            if fetch_calls:usf_analyst_changes.clear()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures={pool.submit(usf_analyst_changes,s):s for s in request_symbols}
+                for f in as_completed(futures):
+                    try:loaded.extend(f.result())
+                    except Exception:failures+=1;failed_symbols.append(futures[f])
+        # Keep other companies and source dates when refreshing a day subset.
+        successful=set(request_symbols)-set(failed_symbols)
+        next_rows=[r for r in calls if r['Symbol'] not in successful];next_rows.extend(r for r in loaded if (start-timedelta(days=1)).isoformat()<=r['Date']<=(end+timedelta(days=1)).isoformat());state['compass']['analyst:'+key]={'rows':next_rows,'loaded_symbols':sorted(set(queried)|successful),'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()};usf_save(state,'compass')
+        if failures:st.warning(str(failures)+' analyst requests failed; coverage is partial.')
+        calls=next_rows
+    pairs=tuple(sorted({(r['Symbol'],r['Date']) for r in shown}));pkey='prices:'+str(__import__('hashlib').sha256(repr(pairs).encode()).hexdigest()[:20]);quotes=state['compass'].get(pkey,{})
+    if pairs and (fetch_prices or not quotes):
+        try:
+            with loading_stopwatch('Fetching US event prices…'):
+                if fetch_prices:usf_event_prices.clear()
+                fetched=usf_event_prices(pairs)
+                quotes={**quotes,**fetched}
+            state['compass'][pkey]=quotes;usf_save(state,'compass')
+        except Exception as exc:st.warning('US event prices unavailable: '+str(exc))
+    shown.sort(key=lambda r:(quotes.get(r['Symbol']+'|'+r['Date'],{}).get('change') is None,-quotes.get(r['Symbol']+'|'+r['Date'],{}).get('change',0) if quotes.get(r['Symbol']+'|'+r['Date'],{}).get('change') is not None else 0,r['Company']))
+    st.markdown('### '+('Entire month' if whole else date.fromisoformat(selected).strftime('%d/%m/%Y')));st.caption('Highest gain first once prices loaded · latest daily close / before-event close − 1 · sourced calls within ±1 US calendar day')
+    if not shown:st.info('No earnings events loaded for this selection.')
+    page=st.number_input('Event-card page',1,max(1,(len(shown)+24)//25),1,key='usfc_page_'+key+'_'+selected+'_'+str(whole)) if len(shown)>25 else 1
+    for r in shown[(int(page)-1)*25:int(page)*25]:
+        q=quotes.get(r['Symbol']+'|'+r['Date'],{});change=q.get('change');colour='#31d47b' if change is not None and change>0 else '#ff7777' if change is not None and change<0 else '#edf4f8';names=mc_broker_names(r,calls);esc=lambda v:html.escape(str(v));money=lambda v:'$'+format(v,',.2f') if v is not None else 'Not loaded';percent=' ('+f'{change:+.2f}'+'%)' if change is not None else ''
+        card='<div class="usfc-card"><div class="usfc-meta">'+esc(date.fromisoformat(r['Date']).strftime('%d/%m/%Y')+' · '+r['Details'])+'</div><span class="usfc-brokers">'+esc(' · '.join(names) or 'No loaded analyst changes')+'</span><h3 style="color:'+colour+'">'+esc(r['Company']+' ('+r['Symbol']+')')+'</h3><div class="usfc-price"><div><small>Before-event close</small><b>'+money(q.get('before'))+'</b></div><div><small>Event-day close</small><b>'+money(q.get('event'))+'</b></div><div><small>Latest close</small><b style="color:'+colour+'">'+money(q.get('latest'))+percent+'</b></div></div><div class="usfc-meta">'+esc('Price date '+(date.fromisoformat(q['latest_date']).strftime('%d/%m/%Y') if q.get('latest_date') else 'Not loaded'))+' · <a href="'+esc(r['Source'])+'" target="_blank" rel="noopener">Earnings source ↗</a></div></div>'
+        st.markdown(card,unsafe_allow_html=True)
+    with st.expander('Loaded analyst changes · sources and IST times'):
+        frame=pd.DataFrame(calls)
+        if not frame.empty:frame['Date']=pd.to_datetime(frame.Date).dt.strftime('%d/%m/%Y');st.dataframe(frame,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source')})
+        else:st.info('Click Update analyst calls. Zero loaded does not mean zero market calls.')
+    with st.expander('US ownership and large-trade disclosures'):
+        st.caption('NSE bulk/block deals have no identical US public feed. Insider filings and institutional filings are separate, delayed disclosures; they are not live large-trade signals.')
+        st.link_button('SEC EDGAR company filings','https://www.sec.gov/edgar/search/')
+    st.caption('Earnings may be estimated. Before/after-market session labels are not exact release times. Public analyst coverage is partial; only displayed event stocks are requested. No invented broker names or trade counts.')
+
+def render_us_fast():
+    state=usf_store();st.markdown('## 🇺🇸 US Fast');mode=st.radio('US Fast view',['By Percentage','🧭 Market Compass'],horizontal=True,key='usf_mode')
+    if mode=='By Percentage':render_usf_percentage(state)
+    else:render_usf_compass(state)
+
+
 def render_fast_percentage():
     st.markdown('## ⚡ Fast')
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
@@ -3368,7 +3673,7 @@ st.markdown("""<style>
 </style>""",unsafe_allow_html=True)
 
 st.sidebar.markdown("## 📈 NSE PRO")
-page=st.sidebar.radio("Open module",["🏠 Dashboard","💼 Portfolio","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","🤝 Deals","📈 Charts","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
+page=st.sidebar.radio("Open module",["🏠 Dashboard","💼 Portfolio","📌 Watchlist","🔥 Market Heatmap","🧠 Pro Analyzer","🚀 Swing Screeners","📰 Stock News","🎯 Brokerage Calls","🌐 All NSE Performance","⚡ Fast","🇺🇸 US Fast","🤝 Deals","📈 Charts","🇺🇸 All US Stocks","⚡ Circuit & Volatility","🏦 Institutional Watch","💾 Market Data Hub"],key="main_page")
 
 
 st.sidebar.markdown("---")
@@ -4520,6 +4825,9 @@ elif page=="📈 Charts":
 
 elif page=="⚡ Fast":
     render_fast_percentage()
+
+elif page=="🇺🇸 US Fast":
+    render_us_fast()
 
 elif page=="🌐 All NSE Performance":
     st.markdown("<div class='hero'><div class='eyebrow'>NSE PERFORMANCE</div><h1>🌐 All NSE Performance</h1><p>Start with market statistics, then explore heat maps, then choose Classic Table or Smart Scanner.</p></div>",unsafe_allow_html=True)
