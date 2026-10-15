@@ -3047,7 +3047,7 @@ def render_fast_market_compass():
 
 
 # US Fast is isolated: its widgets, cache, universes and settings never write NSE Fast data.
-USF_DEFAULTS={'usf_universe':'All NYSE + Nasdaq','usf_period':'1 Day','usf_direction':'Gainer','usf_threshold':0.0,'usf_min_cap':'','usf_max_cap':'','usf_sort':'Percentage Change','usf_order':'High → Low'}
+USF_DEFAULTS={'usf_universe':'All NYSE + Nasdaq','usf_period':'1 Day','usf_direction':'Gainer','usf_threshold':0.0,'usf_cap_group':'All','usf_sort':'Percentage Change','usf_order':'High → Low'}
 @st.cache_resource(show_spinner=False)
 def usf_store():
     import sqlite3
@@ -3071,6 +3071,7 @@ def usf_restore(state):
             value=state['settings'].get(key,default)
             if key=='usf_universe' and value not in ['All NYSE + Nasdaq','S&P 500','NYSE','Nasdaq']:value=default
             if key=='usf_period' and value not in FAST_PERCENT_PERIODS:value=default
+            if key=='usf_cap_group' and value not in ['All','Mega','Large','Mid','Small','Micro']:value='All'
             st.session_state[key]=value
 
 def usf_settings_changed():
@@ -3179,16 +3180,33 @@ def usf_chart(symbol,mode,selected,period):
         frame.index=idx.tz_convert('Asia/Kolkata')
     return frame
 
+def usf_choose_cap(label):
+    st.session_state['usf_cap_group']=label
+    usf_settings_changed()
+
+
+def usf_filter_cap_group(frame,label):
+    if label=='All':return frame
+    bounds={'Mega':(200000,None),'Large':(10000,200000),'Mid':(2000,10000),'Small':(300,2000),'Micro':(0,300)}
+    low,high=bounds[label];cap=pd.to_numeric(frame['Market Cap ($m)'],errors='coerce')
+    mask=cap.notna() & (cap>0) & (cap>=low)
+    if high is not None:mask &= cap<high
+    return frame.loc[mask]
+
+
 def render_usf_percentage(state):
     try:usf_directory(state)
     except Exception as exc:st.warning('US directory request failed: '+str(exc))
     if not state['directory']:st.info('Click Reload US directory to retry.')
     usf_restore(state)
     c=st.columns([2,2,1,1]);group=c[0].selectbox('Universe',['All NYSE + Nasdaq','S&P 500','NYSE','Nasdaq'],key='usf_universe',on_change=usf_settings_changed);period=c[1].selectbox('Trading period',list(FAST_PERCENT_PERIODS),key='usf_period',on_change=usf_settings_changed);direction=c[2].selectbox('Show',['Gainer','Loser'],key='usf_direction',on_change=usf_settings_changed);threshold=c[3].number_input('Minimum move %',min_value=0.0,step=5.0,key='usf_threshold',on_change=usf_settings_changed)
-    c=st.columns(4);low=c[0].text_input('Min market cap ($ million)',key='usf_min_cap',on_change=usf_settings_changed);high=c[1].text_input('Max market cap ($ million)',key='usf_max_cap',on_change=usf_settings_changed);sort=c[2].selectbox('Sort by',['Percentage Change','Market Cap'],key='usf_sort',on_change=usf_settings_changed);order=c[3].selectbox('Order',['High → Low','Low → High'],key='usf_order',on_change=usf_settings_changed)
-    try:lo=float(low.replace(',','')) if low.strip() else None;hi=float(high.replace(',','')) if high.strip() else None
-    except ValueError:st.error('Enter numeric market-cap limits.');return
-    if (lo is not None and lo<0) or (hi is not None and hi<0) or (lo is not None and hi is not None and lo>hi):st.error('Check market-cap limits.');return
+    st.caption('Market cap')
+    cap_columns=st.columns(6)
+    for col,(label,icon) in zip(cap_columns,[('All','🌐'),('Mega','💎'),('Large','🏢'),('Mid','🏬'),('Small','🌱'),('Micro','🔬')]):
+        col.button(icon+' '+label,key='usf_cap_button_'+label,type='primary' if st.session_state['usf_cap_group']==label else 'secondary',use_container_width=True,on_click=usf_choose_cap,args=(label,))
+    cap_group=st.session_state['usf_cap_group']
+    st.caption('USD: Mega ≥ $200bn · Large $10–200bn · Mid $2–10bn · Small $300m–2bn · Micro below $300m (includes nano). All includes stocks with unavailable market cap.')
+    c=st.columns(2);sort=c[0].selectbox('Sort by',['Percentage Change','Market Cap'],key='usf_sort',on_change=usf_settings_changed);order=c[1].selectbox('Order',['High → Low','Low → High'],key='usf_order',on_change=usf_settings_changed)
     symbols=usf_universe(state,group);c=st.columns(3)
     if c[0].button('Update US prices',type='primary',key='usf_update'):
         with loading_stopwatch('Updating US Fast cache…'):usf_update_prices(state,symbols)
@@ -3204,8 +3222,7 @@ def render_usf_percentage(state):
     if query:result=result[(result['Stock Name']+' '+result['Symbol']+' '+result['Sector']).str.lower().str.contains(query,regex=False)]
     if st.button('Update cap / shares / sector for matching stocks',key='usf_meta'):
         with loading_stopwatch('Fetching US company details…'):usf_update_details(state,list(result.Symbol));result=usf_rows(state,list(result.Symbol),period)
-    if lo is not None:result=result[result['Market Cap ($m)']>=lo]
-    if hi is not None:result=result[result['Market Cap ($m)']<=hi]
+    result=usf_filter_cap_group(result,cap_group)
     result=result.sort_values('Market Cap ($m)' if sort=='Market Cap' else 'Change %',ascending=order=='Low → High',na_position='last',kind='mergesort').reset_index(drop=True)
     st.caption(f'{frame["Change %"].notna().sum():,}/{len(symbols):,} stocks have enough saved history · {len(result):,} matches. Shares use Indian comma grouping; prices/cap are US dollars. Market-cap filters exclude missing caps.')
     if result.empty:st.info('No saved stocks match.');return
