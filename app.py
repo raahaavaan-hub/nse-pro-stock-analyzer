@@ -2790,6 +2790,34 @@ def mc_card_html(event,quote,brokers,deals):
     deal_types=sorted({r.get('Deal Type','') for r in deals if r.get('Symbol')==event['Symbol'] and r.get('Date')==event['Date']})
     return '<article class="mc-card"><div class="mc-meta">'+esc(event['Date'].split('-')[::-1][0]+'/'+event['Date'][5:7]+'/'+event['Date'][:4]+' · '+event['Event'])+'</div><div class="mc-heading"><h3 style="color:'+colour+'">'+esc(event['Company']+' ('+event['Symbol']+')')+'</h3><span class="mc-brokers">'+names+'</span></div><p>'+esc(event.get('Details',''))+'</p><div class="mc-prices"><div><small>Before-event close</small><b>'+esc(price(q.get('before')))+'</b></div><div><small>Event-day close</small><b>'+esc(price(q.get('event')))+'</b></div><div><small>Latest available close</small><b style="color:'+colour+'">'+esc(price(q.get('latest'))+pct)+'</b></div></div><div class="mc-meta">'+esc(('Price date '+q.get('latest_date','').split('-')[::-1][0]+'/'+q.get('latest_date','')[5:7]+'/'+q.get('latest_date','')[:4]+' · Yahoo Finance closing prices') if q.get('latest_date') else 'Price unavailable; no guessed percentage')+((' · '+esc('/'.join(deal_types))+' deal on event date') if deal_types else '')+' · <a href="'+esc(link(event.get('Source','')))+'" target="_blank" rel="noopener">Event source ↗</a></div></article>'
 
+def mc_daily_call_rows(calls,selected,companies,prices):
+    daily=[r for r in calls if r.get('Date')==selected]
+    attribution={}
+    for r in daily:
+        attribution.setdefault((r.get('Link') or r.get('Headline','')),set()).add(r.get('Symbol',''))
+    output=[]
+    for number,r in enumerate(sorted(daily,key=lambda r:(r.get('Broker',''),r.get('Symbol',''),r.get('Headline',''))),1):
+        symbol=r.get('Symbol','');q=prices.get(symbol+'|'+selected,{})
+        target=target_from_text(r.get('Headline','')) if symbol and len(attribution.get(r.get('Link') or r.get('Headline',''),set()))==1 else None
+        tone,reason=mc_call_tone(r.get('Headline',''))
+        output.append({'Sl No':number,'Brokerage':r.get('Broker',''),'Stock':companies.get(symbol,symbol) if symbol else 'Stock not identified','Symbol':symbol or '—','Target Price ₹':target,'Latest Close ₹':q.get('latest'),'Price Date':datetime.fromisoformat(q['latest_date']).strftime('%d/%m/%Y') if q.get('latest_date') else 'Unavailable','Call':reason,'Headline':r.get('Headline',''),'Source':r.get('Link','')})
+    return output
+
+
+def mc_render_daily_calls(calls,selected,companies,prices):
+    rows=mc_daily_call_rows(calls,selected,companies,prices)
+    st.markdown('### Brokerage calls · '+datetime.fromisoformat(selected).strftime('%d/%m/%Y')+' · '+str(len(rows)))
+    st.caption('Same sourced mentions counted in the calendar, including stocks without an event. Targets are shown only when a single-stock headline explicitly gives a price. Missing values are unavailable. Prices are latest available closes, not live quotes.')
+    if not rows:st.info('No sourced calls loaded for this date.');return
+    frame=pd.DataFrame(rows)
+    def colour(row):
+        tone,_=mc_call_tone(row['Headline']);c={'positive':'#31d47b','negative':'#ff7777','neutral':'#d6c3ff'}[tone]
+        return ['color: '+c if name in ['Brokerage','Call'] else '' for name in row.index]
+    styled=frame.style.apply(colour,axis=1).format({'Target Price ₹':lambda v:'₹'+dashboard_indian_price(v),'Latest Close ₹':lambda v:'₹'+dashboard_indian_price(v)},na_rep='Unavailable')
+    st.dataframe(styled,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Read ↗')})
+    st.download_button('Download selected-day calls',frame.to_csv(index=False).encode('utf-8-sig'),'brokerage_calls_'+selected+'.csv','text/csv',key='mc_daily_calls_csv')
+
+
 def mc_deal_refresh(data,start,end,refresh=False):
     """Keep saved rows on errors and cache failed attempts to avoid repeated retries."""
     from datetime import date as Date
@@ -2893,7 +2921,7 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
         k=(r['Symbol'],r['Date'],r['Event'])
         if k not in unique:unique[k]=dict(r)
         elif r['Details'] not in unique[k]['Details']:unique[k]['Details']+=' · '+r['Details']
-    shown=list(unique.values());pairs=tuple(sorted({(r['Symbol'],r['Date']) for r in shown}));pkey='colour-prices:'+prefix+':'+str(__import__('hashlib').sha256(repr(pairs).encode()).hexdigest()[:16]);pdata=mc_cache_read(pkey)
+    shown=list(unique.values());daily_calls=[r for r in calls if r.get('Date')==selected];pairs=tuple(sorted({(r['Symbol'],r['Date']) for r in shown if r.get('Symbol')}|{(r['Symbol'],r['Date']) for r in daily_calls if r.get('Symbol')}));pkey='colour-prices:'+prefix+':'+str(__import__('hashlib').sha256(repr(pairs).encode()).hexdigest()[:16]);pdata=mc_cache_read(pkey)
     if pairs and (refresh or mc_needs_update(pdata)):
         with loading_stopwatch('Fetching prices for visible event stocks…'):
             try:
@@ -2903,6 +2931,7 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
                 if len(fetched['prices'])<len(pairs):st.warning('Some prices are unavailable. Those cards remain visible without guessed returns.')
             except Exception as exc:st.warning('Price update failed: '+str(exc))
     prices=(pdata or {}).get('prices',{})
+    mc_render_daily_calls(calls,selected,companies,prices)
     def change(row):return prices.get(row['Symbol']+'|'+row['Date'],{}).get('change')
     shown.sort(key=lambda row:(change(row) is None,-change(row) if change(row) is not None else 0,row['Company']))
     st.markdown('### '+('Entire month' if all_days else Date.fromisoformat(selected).strftime('%d/%m/%Y')))
