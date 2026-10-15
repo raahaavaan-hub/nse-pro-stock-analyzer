@@ -2683,12 +2683,50 @@ def mc_clean_name(value):
 def mc_match_symbols(text,companies):
     text=' '+mc_clean_name(text)+' ';matched=[]
     for symbol,company in companies.items():
-        name=re.sub(r'\b(limited|ltd|private|pvt)\b','',mc_clean_name(company)).strip();name=' '.join(name.split())
-        phrases=[mc_clean_name(symbol),name]
-        words=name.split()
-        if len(words)>=2:phrases.append(' '.join(words[:2]))
-        if any(len(p)>=4 and ' '+p+' ' in text for p in phrases if p):matched.append(symbol)
-    return matched
+        name=' '.join(re.sub(r'\b(limited|ltd|private|pvt)\b','',mc_clean_name(company)).split())
+        phrases=[name]
+        clean_symbol=mc_clean_name(symbol)
+        if len(clean_symbol)>=3:phrases.append(clean_symbol)
+        if any(len(phrase)>=3 and ' '+phrase+' ' in text for phrase in phrases if phrase):matched.append(symbol)
+    return sorted(set(matched))
+
+
+def mc_stock_catalog(event_companies,refresh=False):
+    data=mc_cache_read('stock-catalog:v2')
+    if data is None or refresh:
+        try:
+            response=requests.get(NSE_URL,headers=HEADERS,timeout=(4,10));response.raise_for_status()
+            frame=pd.read_csv(io.StringIO(response.content.decode('utf-8-sig')));frame.columns=frame.columns.str.strip()
+            if not {'SYMBOL','NAME OF COMPANY'}.issubset(frame.columns):raise ValueError('Unexpected stock directory columns')
+            names=dict(zip(frame['SYMBOL'].astype(str).str.strip(),frame['NAME OF COMPANY'].astype(str).str.strip()))
+            data={'names':names,'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'complete':True};mc_cache_write('stock-catalog:v2',data)
+        except Exception as exc:
+            # Cache the failure as well; filter clicks must not retry the network.
+            data=dict(data or {'names':{},'complete':False});data['error']=str(exc);mc_cache_write('stock-catalog:v2',data)
+    companies=dict(data.get('names',{}));companies.update(event_companies)
+    if not data.get('complete'):st.caption('Full NSE name directory unavailable; using saved event names. Unmatched articles are listed separately.')
+    return companies
+
+
+def mc_group_broker_calls(calls,companies):
+    articles={}
+    for row in calls:
+        key=(row.get('Date',''),row.get('Broker',''),row.get('Link') or row.get('Headline',''))
+        articles.setdefault(key,row)
+    grouped={};unmatched=[]
+    for row in articles.values():
+        symbols=mc_match_symbols(row.get('Headline',''),companies)
+        if not symbols:unmatched.append(dict(row,Symbol=''));continue
+        for symbol in symbols:
+            key=(row.get('Date',''),row.get('Broker',''),symbol)
+            group=grouped.setdefault(key,dict(row,Symbol=symbol,Articles=[]))
+            group['Articles'].append({'Headline':row.get('Headline',''),'Link':row.get('Link',''),'AmbiguousTarget':len(symbols)>1})
+    output=[]
+    for group in grouped.values():
+        group['Headline']=' | '.join(dict.fromkeys(r['Headline'] for r in group['Articles']))
+        output.append(group)
+    return output,unmatched
+
 
 def mc_fetch_broker_month(start,end,companies):
     from concurrent.futures import ThreadPoolExecutor,as_completed
@@ -2798,7 +2836,11 @@ def mc_daily_call_rows(calls,selected,companies,prices):
     output=[]
     for number,r in enumerate(sorted(daily,key=lambda r:(r.get('Broker',''),r.get('Symbol',''),r.get('Headline',''))),1):
         symbol=r.get('Symbol','');q=prices.get(symbol+'|'+selected,{})
-        target=target_from_text(r.get('Headline','')) if symbol and len(attribution.get(r.get('Link') or r.get('Headline',''),set()))==1 else None
+        articles=r.get('Articles')
+        if articles is not None:
+            targets={target_from_text(a.get('Headline','')) for a in articles if not a.get('AmbiguousTarget')}
+            targets.discard(None);target=next(iter(targets)) if len(targets)==1 else None
+        else:target=target_from_text(r.get('Headline','')) if symbol and len(attribution.get(r.get('Link') or r.get('Headline',''),set()))==1 else None
         tone,reason=mc_call_tone(r.get('Headline',''))
         output.append({'Sl No':number,'Brokerage':r.get('Broker',''),'Stock':companies.get(symbol,symbol) if symbol else 'Stock not identified','Symbol':symbol or '—','Target Price ₹':target,'Latest Close ₹':q.get('latest'),'Price Date':datetime.fromisoformat(q['latest_date']).strftime('%d/%m/%Y') if q.get('latest_date') else 'Unavailable','Call':reason,'Headline':r.get('Headline',''),'Source':r.get('Link','')})
     return output
@@ -2807,7 +2849,7 @@ def mc_daily_call_rows(calls,selected,companies,prices):
 def mc_render_daily_calls(calls,selected,companies,prices):
     rows=mc_daily_call_rows(calls,selected,companies,prices)
     st.markdown('### Brokerage calls · '+datetime.fromisoformat(selected).strftime('%d/%m/%Y')+' · '+str(len(rows)))
-    st.caption('Same sourced mentions counted in the calendar, including stocks without an event. Targets are shown only when a single-stock headline explicitly gives a price. Missing values are unavailable. Prices are latest available closes, not live quotes.')
+    st.caption('One row per brokerage + stock + date; repeated articles are combined. Counts match the calendar. Targets require an explicit single-stock headline; conflicting targets are left unavailable. Latest closes are not live quotes.')
     if not rows:st.info('No sourced calls loaded for this date.');return
     frame=pd.DataFrame(rows)
     def colour(row):
@@ -2870,7 +2912,7 @@ def mc_import_deal_reports():
 def mc_render_colour_news(data,start,end,prefix,query,refresh):
     import calendar
     from datetime import date as Date
-    all_events=data['rows'];companies={r['Symbol']:r['Company'] for r in all_events if r['Symbol']}
+    all_events=data['rows'];companies=mc_stock_catalog({r['Symbol']:r['Company'] for r in all_events if r['Symbol']},refresh)
     bkey='colour-brokers:'+prefix;bdata=mc_cache_read(bkey);dkey='deals:'+prefix;ddata=mc_cache_read(dkey)
     # Fetch only this isolated view's month; existing scanners keep their own caches.
     with loading_stopwatch('Updating brokerage coverage and deal panel…'):
@@ -2878,13 +2920,17 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
             try:bdata=mc_fetch_broker_month(start,end,companies);mc_cache_write(bkey,bdata)
             except Exception as exc:st.warning('Brokerage update failed: '+str(exc))
         ddata=mc_deal_refresh(ddata,start,end,refresh)
-    calls=(bdata or {}).get('rows',[]);deals=(ddata or {}).get('rows',[])
+    calls,unmatched_calls=mc_group_broker_calls((bdata or {}).get('rows',[]),companies);deals=(ddata or {}).get('rows',[])
+    if unmatched_calls:
+        with st.expander('Unmatched articles — excluded from call counts ('+str(len(unmatched_calls))+')'):
+            st.caption('Stock could not be matched confidently. No guessed stock or target is shown.')
+            st.dataframe(pd.DataFrame(unmatched_calls)[['Date','Broker','Headline','Link']],hide_index=True,use_container_width=True)
     filtered=[r for r in all_events if not query or query in (r['Company']+' '+r['Symbol']).lower()]
     typ=st.selectbox('Event type',['All','Scheduled results','Board meeting','Results announcement'],key='mc_type')
     if typ!='All':filtered=[r for r in filtered if r['Event']==typ]
     month_calls=[c for c in calls if c['Date'].startswith(prefix)]
     st.markdown('<style>.mc-summary{display:flex;gap:12px;margin:12px 0}.mc-summary span{padding:12px 18px;background:#142a36;border:1px solid #2d5363;border-radius:12px;color:#87e8bb;font-weight:700}.mc-card{padding:15px 18px;margin:10px 0;background:#14212d;border:1px solid #2c4150;border-radius:12px;color:#edf4f8}.mc-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.mc-heading h3{font-size:18px;margin:7px 0}.mc-brokers{color:#d6c3ff;font-size:12px}.mc-card p{font-size:12px;line-height:1.5;margin:5px 0 10px}.mc-meta{color:#afc1cf;font-size:11px}.mc-prices{display:flex;gap:28px;flex-wrap:wrap;background:#0c141d;padding:12px;border-radius:9px;margin:9px 0}.mc-prices small{display:block;color:#a7bac8;font-size:11px}.mc-prices b{font-size:17px}.mc-card a{color:#87e8bb}.mc-panel{background:#14212d;padding:12px;border-radius:12px;color:#edf4f8;border:1px solid #2c4150}.mc-panel h4{margin:4px 0 12px}.mc-panel p{font-size:12px;margin:5px 0}.st-key-mc_calendar button{background:#0c141d;border:1px solid #2c5364;min-height:76px;border-radius:10px;color:#a5ebc5}.st-key-mc_calendar button p{white-space:pre-line;font-size:12px}.st-key-mc_calendar button:hover{border-color:#87e8bb}.st-key-mc_calendar [data-testid="stHorizontalBlock"]{gap:6px}.st-key-mc_calendar [data-testid="stVerticalBlock"]{gap:6px}@media(max-width:600px){.mc-heading h3{font-size:15px}.mc-prices{gap:14px}.mc-prices b{font-size:14px}}</style>',unsafe_allow_html=True)
-    st.markdown('<div class="mc-summary"><span>'+str(len(filtered))+' events this month</span><span>'+str(len(month_calls))+' sourced call mentions</span></div>',unsafe_allow_html=True)
+    st.markdown('<div class="mc-summary"><span>'+str(len(filtered))+' events this month</span><span>'+str(len(month_calls))+' unique broker / stock / day calls</span></div>',unsafe_allow_html=True)
     st.caption('Broker names: green = target raised / positive call · red = target lowered / negative call · purple = unclear or mixed. Hover over a name for the headline. Stock price-change colours remain independent.')
     st.caption('Brokerage coverage: public news only, partial · '+('Fetched '+str(bdata['updated']) if bdata else 'Not loaded'))
     if bdata and bdata.get('errors'):st.caption(str(len(bdata['errors']))+' brokerage requests failed; counts may be incomplete.')
