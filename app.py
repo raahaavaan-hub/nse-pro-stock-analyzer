@@ -2748,15 +2748,47 @@ def mc_batch_prices(events_tuple):
         output[event['Symbol']+'|'+event['Date']]={'before':before,'event':same[-1][1] if same else None,'latest':latest,'latest_date':points[-1][0].isoformat(),'change':(latest/before-1)*100 if before and day<=today else None}
     return {'prices':output,'errors':sorted(set(errors)),'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()}
 
+def mc_call_tone(headline,latest=None):
+    """Headline-only signal, separate from the stock's realised price change."""
+    text=str(headline or '').lower()
+    positive=bool(re.search(r'\b(?:rais\w*|hik\w*|lift\w*|increas\w*)\b.{0,45}\b(?:target|pt)\b|\b(?:target|pt)\b.{0,30}\b(?:rais\w*|hik\w*|lift\w*|increas\w*)\b',text))
+    negative=bool(re.search(r'\b(?:cut\w*|slash\w*|lower\w*|reduc\w*)\b.{0,45}\b(?:target|pt)\b|\b(?:target|pt)\b.{0,30}\b(?:cut\w*|slash\w*|lower\w*|reduc\w*)\b',text))
+    if positive or negative:
+        return ('neutral','Mixed target changes') if positive and negative else ('positive','Target raised') if positive else ('negative','Target lowered')
+    positive=bool(re.search(r'\b(?:buy|outperform|overweight|bullish|upgrade\w*)\b',text))
+    negative=bool(re.search(r'\b(?:sell|underperform|underweight|bearish|downgrade\w*)\b',text))
+    if positive or negative:
+        return ('neutral','Mixed / unclear call') if positive and negative else ('positive','Positive call') if positive else ('negative','Negative call')
+    # A target alone is not a rating or a target revision. Leave it neutral.
+    return 'neutral','No clear direction in headline'
+
+
+def mc_broker_badges(event,calls):
+    day=datetime.fromisoformat(event['Date']).date();matched={}
+    for row in calls:
+        if row.get('Symbol')==event['Symbol'] and abs((datetime.fromisoformat(row['Date']).date()-day).days)<=1:
+            matched.setdefault(row['Broker'],[]).append(row)
+    badges=[]
+    for broker,rows in sorted(matched.items()):
+        latest=max(r['Date'] for r in rows);rows=[r for r in rows if r['Date']==latest]
+        signals=[mc_call_tone(r.get('Headline','')) for r in rows];tones={tone for tone,reason in signals if tone!='neutral'}
+        tone=next(iter(tones)) if len(tones)==1 else 'neutral'
+        colour={'positive':'#31d47b','negative':'#ff7777','neutral':'#d6c3ff'}[tone]
+        tip=' | '.join(reason+': '+str(row.get('Headline','')) for row,(_,reason) in zip(rows,signals))
+        if len(tones)>1:tip='Mixed calls — '+tip
+        badges.append('<span style="color:'+colour+';font-weight:700" title="'+html.escape(tip,quote=True)+'">'+html.escape(broker)+'</span>')
+    return ' · '.join(badges) or '<span style="color:#afc1cf">No matching sourced call</span>'
+
+
 def mc_card_html(event,quote,brokers,deals):
     q=quote or {};change=q.get('change');colour='#31d47b' if change is not None and change>0 else '#ff7777' if change is not None and change<0 else '#edf4f8'
     def esc(value):return html.escape(str(value))
     def price(value):return '₹'+dashboard_indian_price(value) if value is not None else 'Unavailable'
     def link(url):return url if str(url).startswith(('https://','http://')) else ''
-    names=' · '.join(brokers) if brokers else 'No matching sourced call'
+    names=mc_broker_badges(event,brokers)
     pct=(' ('+f'{change:+.2f}'+'%)') if change is not None else ''
     deal_types=sorted({r.get('Deal Type','') for r in deals if r.get('Symbol')==event['Symbol'] and r.get('Date')==event['Date']})
-    return '<article class="mc-card"><div class="mc-meta">'+esc(event['Date'].split('-')[::-1][0]+'/'+event['Date'][5:7]+'/'+event['Date'][:4]+' · '+event['Event'])+'</div><div class="mc-heading"><h3 style="color:'+colour+'">'+esc(event['Company']+' ('+event['Symbol']+')')+'</h3><span class="mc-brokers">'+esc(names)+'</span></div><p>'+esc(event.get('Details',''))+'</p><div class="mc-prices"><div><small>Before-event close</small><b>'+esc(price(q.get('before')))+'</b></div><div><small>Event-day close</small><b>'+esc(price(q.get('event')))+'</b></div><div><small>Latest available close</small><b style="color:'+colour+'">'+esc(price(q.get('latest'))+pct)+'</b></div></div><div class="mc-meta">'+esc(('Price date '+q.get('latest_date','').split('-')[::-1][0]+'/'+q.get('latest_date','')[5:7]+'/'+q.get('latest_date','')[:4]+' · Yahoo Finance closing prices') if q.get('latest_date') else 'Price unavailable; no guessed percentage')+((' · '+esc('/'.join(deal_types))+' deal on event date') if deal_types else '')+' · <a href="'+esc(link(event.get('Source','')))+'" target="_blank" rel="noopener">Event source ↗</a></div></article>'
+    return '<article class="mc-card"><div class="mc-meta">'+esc(event['Date'].split('-')[::-1][0]+'/'+event['Date'][5:7]+'/'+event['Date'][:4]+' · '+event['Event'])+'</div><div class="mc-heading"><h3 style="color:'+colour+'">'+esc(event['Company']+' ('+event['Symbol']+')')+'</h3><span class="mc-brokers">'+names+'</span></div><p>'+esc(event.get('Details',''))+'</p><div class="mc-prices"><div><small>Before-event close</small><b>'+esc(price(q.get('before')))+'</b></div><div><small>Event-day close</small><b>'+esc(price(q.get('event')))+'</b></div><div><small>Latest available close</small><b style="color:'+colour+'">'+esc(price(q.get('latest'))+pct)+'</b></div></div><div class="mc-meta">'+esc(('Price date '+q.get('latest_date','').split('-')[::-1][0]+'/'+q.get('latest_date','')[5:7]+'/'+q.get('latest_date','')[:4]+' · Yahoo Finance closing prices') if q.get('latest_date') else 'Price unavailable; no guessed percentage')+((' · '+esc('/'.join(deal_types))+' deal on event date') if deal_types else '')+' · <a href="'+esc(link(event.get('Source','')))+'" target="_blank" rel="noopener">Event source ↗</a></div></article>'
 
 def mc_deal_refresh(data,start,end,refresh=False):
     """Keep saved rows on errors and cache failed attempts to avoid repeated retries."""
@@ -2825,6 +2857,7 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
     month_calls=[c for c in calls if c['Date'].startswith(prefix)]
     st.markdown('<style>.mc-summary{display:flex;gap:12px;margin:12px 0}.mc-summary span{padding:12px 18px;background:#142a36;border:1px solid #2d5363;border-radius:12px;color:#87e8bb;font-weight:700}.mc-card{padding:15px 18px;margin:10px 0;background:#14212d;border:1px solid #2c4150;border-radius:12px;color:#edf4f8}.mc-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.mc-heading h3{font-size:18px;margin:7px 0}.mc-brokers{color:#d6c3ff;font-size:12px}.mc-card p{font-size:12px;line-height:1.5;margin:5px 0 10px}.mc-meta{color:#afc1cf;font-size:11px}.mc-prices{display:flex;gap:28px;flex-wrap:wrap;background:#0c141d;padding:12px;border-radius:9px;margin:9px 0}.mc-prices small{display:block;color:#a7bac8;font-size:11px}.mc-prices b{font-size:17px}.mc-card a{color:#87e8bb}.mc-panel{background:#14212d;padding:12px;border-radius:12px;color:#edf4f8;border:1px solid #2c4150}.mc-panel h4{margin:4px 0 12px}.mc-panel p{font-size:12px;margin:5px 0}.st-key-mc_calendar button{background:#0c141d;border:1px solid #2c5364;min-height:76px;border-radius:10px;color:#a5ebc5}.st-key-mc_calendar button p{white-space:pre-line;font-size:12px}.st-key-mc_calendar button:hover{border-color:#87e8bb}.st-key-mc_calendar [data-testid="stHorizontalBlock"]{gap:6px}.st-key-mc_calendar [data-testid="stVerticalBlock"]{gap:6px}@media(max-width:600px){.mc-heading h3{font-size:15px}.mc-prices{gap:14px}.mc-prices b{font-size:14px}}</style>',unsafe_allow_html=True)
     st.markdown('<div class="mc-summary"><span>'+str(len(filtered))+' events this month</span><span>'+str(len(month_calls))+' sourced call mentions</span></div>',unsafe_allow_html=True)
+    st.caption('Broker names: green = target raised / positive call · red = target lowered / negative call · purple = unclear or mixed. Hover over a name for the headline. Stock price-change colours remain independent.')
     st.caption('Brokerage coverage: public news only, partial · '+('Fetched '+str(bdata['updated']) if bdata else 'Not loaded'))
     if bdata and bdata.get('errors'):st.caption(str(len(bdata['errors']))+' brokerage requests failed; counts may be incomplete.')
     left,right=st.columns([3,1])
@@ -2877,7 +2910,7 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
     if pdata:st.caption('Prices fetched '+pdata['updated'])
     if not shown:st.info('No events loaded for this selection.')
     page=st.number_input('Card page',min_value=1,max_value=max(1,(len(shown)+24)//25),value=1,key='mc_card_page_'+prefix+'_'+selected+'_'+str(all_days)) if len(shown)>25 else 1
-    for r in shown[(int(page)-1)*25:int(page)*25]:st.markdown(mc_card_html(r,prices.get(r['Symbol']+'|'+r['Date']),mc_broker_names(r,calls),deals),unsafe_allow_html=True)
+    for r in shown[(int(page)-1)*25:int(page)*25]:st.markdown(mc_card_html(r,prices.get(r['Symbol']+'|'+r['Date']),calls,deals),unsafe_allow_html=True)
     st.caption('Broker names match sourced stock mentions within ±1 calendar day of the event. Unmatched articles are retained in Brokerage Calls. Future events have no realised event return.')
     if shown:
         frame=pd.DataFrame([{**r,'Brokerages':' · '.join(mc_broker_names(r,calls)),'Change %':change(r)} for r in shown]);frame['Date']=frame['Date'].map(lambda d:datetime.fromisoformat(d).strftime('%d/%m/%Y'));st.download_button('Download event list',frame.to_csv(index=False).encode(),'market_compass.csv','text/csv',key='mc_events_csv')
