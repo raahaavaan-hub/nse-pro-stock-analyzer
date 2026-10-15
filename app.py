@@ -2758,6 +2758,55 @@ def mc_card_html(event,quote,brokers,deals):
     deal_types=sorted({r.get('Deal Type','') for r in deals if r.get('Symbol')==event['Symbol'] and r.get('Date')==event['Date']})
     return '<article class="mc-card"><div class="mc-meta">'+esc(event['Date'].split('-')[::-1][0]+'/'+event['Date'][5:7]+'/'+event['Date'][:4]+' · '+event['Event'])+'</div><div class="mc-heading"><h3 style="color:'+colour+'">'+esc(event['Company']+' ('+event['Symbol']+')')+'</h3><span class="mc-brokers">'+esc(names)+'</span></div><p>'+esc(event.get('Details',''))+'</p><div class="mc-prices"><div><small>Before-event close</small><b>'+esc(price(q.get('before')))+'</b></div><div><small>Event-day close</small><b>'+esc(price(q.get('event')))+'</b></div><div><small>Latest available close</small><b style="color:'+colour+'">'+esc(price(q.get('latest'))+pct)+'</b></div></div><div class="mc-meta">'+esc(('Price date '+q.get('latest_date','').split('-')[::-1][0]+'/'+q.get('latest_date','')[5:7]+'/'+q.get('latest_date','')[:4]+' · Yahoo Finance closing prices') if q.get('latest_date') else 'Price unavailable; no guessed percentage')+((' · '+esc('/'.join(deal_types))+' deal on event date') if deal_types else '')+' · <a href="'+esc(link(event.get('Source','')))+'" target="_blank" rel="noopener">Event source ↗</a></div></article>'
 
+def mc_deal_refresh(data,start,end,refresh=False):
+    """Keep saved rows on errors and cache failed attempts to avoid repeated retries."""
+    from datetime import date as Date
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    if start>today:return data
+    if not refresh and data and not mc_needs_update({'updated':data.get('attempted',data.get('updated',''))}):return data
+    result=dict(data or {});rows=list(result.get('rows',[]));errors=[];success=[]
+    for kind in ['Bulk','Block']:
+        try:
+            fresh=deals_fetch(start,min(end,today),kind)
+            rows.extend(fresh);success.append(kind)
+        except Exception as exc:errors.append(kind+': '+str(exc))
+    keys=['Date','Symbol','Client','Action','Quantity','Avg Price','Deal Type']
+    result['rows']=list({tuple(str(r.get(k,'')) for k in keys):r for r in rows}.values())
+    now=datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()
+    result.update(attempted=now,errors=errors)
+    if success:result['updated']=now;result['origin']='NSE online reports + saved/imported records'
+    mc_cache_write('deals:'+start.strftime('%Y-%m'),result)
+    return result
+
+
+def mc_import_deal_reports():
+    with st.expander('Import NSE bulk / block CSV reports if online update is blocked'):
+        st.caption('Download a CSV from the official NSE report page, choose its deal type and upload. Existing records are kept; duplicate rows are merged. Imports are saved in the app cache, not a permanent external backup.')
+        st.link_button('Open official NSE deal reports','https://www.nseindia.com/report-detail/display-bulk-and-block-deals',key='mc_import_source')
+        kind=st.selectbox('Report type',['Bulk','Block'],key='mc_import_kind')
+        uploads=st.file_uploader('NSE CSV reports',type=['csv'],accept_multiple_files=True,key='mc_deal_upload')
+        if st.button('Save uploaded reports',key='mc_import_save',disabled=not uploads):
+            imported=[];failures=[]
+            for upload in uploads or []:
+                try:
+                    raw=upload.getvalue()
+                    try:text=raw.decode('utf-8-sig')
+                    except UnicodeDecodeError:text=raw.decode('cp1252')
+                    rows=deals_normalize(pd.read_csv(io.StringIO(text)),kind)
+                    if not rows:raise ValueError('No valid deal rows found. Check the dates and numeric columns.')
+                    imported.extend(rows)
+                except Exception as exc:failures.append(upload.name+': '+str(exc))
+            for error in failures:st.error(error)
+            months=sorted({r['Date'][:7] for r in imported})
+            for month in months:
+                key='deals:'+month;old=mc_cache_read(key) or {};rows=list(old.get('rows',[]))+[r for r in imported if r['Date'].startswith(month)]
+                fields=['Date','Symbol','Client','Action','Quantity','Avg Price','Deal Type']
+                old['rows']=list({tuple(str(r.get(k,'')) for k in fields):r for r in rows}.values())
+                old['imported_at']=datetime.now(ZoneInfo('Asia/Kolkata')).isoformat();old['origin']='Uploaded NSE CSV + saved records'
+                mc_cache_write(key,old)
+            if imported:st.success(str(len(imported))+' report rows processed for '+', '.join(months)+'. Select that month to view them.')
+
+
 def mc_render_colour_news(data,start,end,prefix,query,refresh):
     import calendar
     from datetime import date as Date
@@ -2768,17 +2817,7 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
         if refresh or mc_needs_update(bdata):
             try:bdata=mc_fetch_broker_month(start,end,companies);mc_cache_write(bkey,bdata)
             except Exception as exc:st.warning('Brokerage update failed: '+str(exc))
-        if refresh or mc_needs_update(ddata):
-            deals=[];failures=[];today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
-            if start<=today:
-                for kind in ['Bulk','Block']:
-                    try:deals.extend(deals_fetch(start,min(end,today),kind))
-                    except Exception as exc:failures.append(kind+': '+str(exc))
-                if len(failures)<2:
-                    if failures and ddata:deals.extend(ddata['rows'])
-                    unique={tuple(str(r.get(k,'')) for k in ['Date','Symbol','Client','Action','Quantity','Avg Price','Deal Type']):r for r in deals}
-                    ddata={'rows':list(unique.values()),'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'errors':failures};mc_cache_write(dkey,ddata)
-                for error in failures:st.warning('Deal panel: '+error)
+        ddata=mc_deal_refresh(ddata,start,end,refresh)
     calls=(bdata or {}).get('rows',[]);deals=(ddata or {}).get('rows',[])
     filtered=[r for r in all_events if not query or query in (r['Company']+' '+r['Symbol']).lower()]
     typ=st.selectbox('Event type',['All','Scheduled results','Board meeting','Results announcement'],key='mc_type')
@@ -2802,15 +2841,17 @@ def mc_render_colour_news(data,start,end,prefix,query,refresh):
                         if col.button(str(day)+'\n'+str(ec)+' events\n'+str(bc)+' calls',key='mc_day_'+key,type='primary' if key==selected else 'secondary',use_container_width=True):selected=key;st.session_state['mc_selected']=key;st.rerun()
     with right:
         st.markdown('#### Bulk & Block Deals');st.caption(Date.fromisoformat(selected).strftime('%d/%m/%Y'))
+        if ddata and ddata.get('errors'):st.warning('Update blocked / incomplete. Showing saved or imported records only. Open Deals or import the official CSV report above.')
         day_deals=[r for r in deals if r['Date']==selected]
         panel='<div class="mc-panel">'
         for kind,colour in [('Bulk','#87e8bb'),('Block','#ff9696')]:
             panel+='<h4 style="color:'+colour+'">'+kind+' deals</h4>';counts={}
             for r in day_deals:
                 if r['Deal Type']==kind:counts[r['Symbol']]=counts.get(r['Symbol'],0)+1
-            panel+=''.join('<p style="color:'+colour+'">'+html.escape(companies.get(symbol,symbol))+' ('+html.escape(symbol)+') × '+str(count)+'</p>' for symbol,count in sorted(counts.items(),key=lambda x:-x[1])) or '<p>No loaded records</p>'
+            panel+=''.join('<p style="color:'+colour+'">'+html.escape(companies.get(symbol,symbol))+' ('+html.escape(symbol)+') × '+str(count)+'</p>' for symbol,count in sorted(counts.items(),key=lambda x:-x[1])) or '<p>No saved records for this date; report coverage is unconfirmed.</p>'
         panel+='</div>';st.markdown(panel,unsafe_allow_html=True)
-        if ddata:st.caption('Reports fetched '+ddata['updated'])
+        if ddata and ddata.get('updated'):st.caption('Last successful online fetch: '+ddata['updated'])
+        if ddata and ddata.get('imported_at'):st.caption('CSV imported: '+ddata['imported_at'])
         st.link_button('NSE deal source','https://www.nseindia.com/report-detail/display-bulk-and-block-deals')
     all_days=st.checkbox('Show entire month',key='mc_all_days');shown=filtered if all_days else [r for r in filtered if r['Date']==selected]
     # One card per company/date/type; preserve every source detail in the combined text.
@@ -2855,6 +2896,7 @@ def render_fast_market_compass():
     start=Date(int(year),month,1);end=Date(int(year),month,calendar.monthrange(int(year),month)[1]);prefix=start.strftime('%Y-%m')
     refresh=controls[2].button('↻ Update',key='mc_refresh')
     query=controls[3].text_input('Search company / symbol / client',key='mc_search').strip().lower()
+    if mode in ['📰 Market News','🤝 Deals']:mc_import_deal_reports()
     if mode=='📰 Market News':
         key='events:'+prefix;data=mc_cache_read(key)
         if refresh or mc_needs_update(data):
@@ -2874,19 +2916,12 @@ def render_fast_market_compass():
         mc_render_colour_news(data,start,end,prefix,query,refresh)
     elif mode=='🤝 Deals':
         key='deals:'+prefix;data=mc_cache_read(key)
-        if refresh or mc_needs_update(data):
-            rows=[];errors=[]
-            with loading_stopwatch('Fetching NSE bulk/block deals…'):
-                for kind in ['Bulk','Block']:
-                    try:rows.extend(deals_fetch(start,min(end,today),kind))
-                    except Exception as exc:errors.append(kind+': '+str(exc))
-            if len(errors)<2:
-                if data and errors:rows.extend(data['rows'])
-                data={'rows':rows,'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'errors':errors};mc_cache_write(key,data)
-            for error in errors:st.warning('Online report unavailable: '+error)
+        with loading_stopwatch('Checking saved / online NSE deal reports…'):
+            data=mc_deal_refresh(data,start,end,refresh)
+        for error in (data or {}).get('errors',[]):st.warning('Update blocked / incomplete: '+error)
         st.link_button('Official NSE bulk/block reports','https://www.nseindia.com/report-detail/display-bulk-and-block-deals')
         if data:
-            st.caption('NSE reports fetched '+data['updated']);rows=data['rows']
+            st.caption('Last successful online fetch: '+str(data.get('updated','Not available'))+' · CSV imported: '+str(data.get('imported_at','Not available')));rows=data['rows']
             rows=[r for r in rows if not query or query in ' '.join(str(v) for v in r.values()).lower()];mc_show_table(rows,'mc_deals_csv')
         else:st.info('No online deals could be loaded. No saved snapshot is presented as live.')
     else:
