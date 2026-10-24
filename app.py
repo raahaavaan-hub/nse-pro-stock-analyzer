@@ -3048,22 +3048,60 @@ def render_fast_market_compass():
 
 # US Fast is isolated: its widgets, cache, universes and settings never write NSE Fast data.
 USF_DEFAULTS={'usf_universe':'All NYSE + Nasdaq','usf_period':'1 Day','usf_direction':'Gainer','usf_threshold':0.0,'usf_cap_group':'All','usf_sort':'Percentage Change','usf_order':'High → Low'}
+class USFastDiskRecords:
+    """Read one history at a time; never retain all US candles in RAM."""
+    def __init__(self,path,lock):self.path=path;self.lock=lock
+    def get(self,symbol,default=None):
+        import sqlite3
+        with self.lock,sqlite3.connect(self.path,timeout=30) as db:
+            row=db.execute('SELECT payload FROM stocks WHERE symbol=?',(symbol,)).fetchone()
+        return json.loads(row[0]) if row else default
+    def __getitem__(self,symbol):
+        value=self.get(symbol)
+        if value is None:raise KeyError(symbol)
+        return value
+    def __setitem__(self,symbol,value):
+        import sqlite3
+        with self.lock,sqlite3.connect(self.path,timeout=30) as db:
+            db.execute('INSERT OR REPLACE INTO stocks VALUES (?,?)',(symbol,json.dumps(value)))
+
+
 @st.cache_resource(show_spinner=False)
 def usf_store():
     import sqlite3
     folder=Path('.us_fast');folder.mkdir(exist_ok=True)
-    state={'path':str(folder/'data.sqlite3'),'lock':threading.RLock(),'records':{},'meta':{},'directory':[],'sp500':{},'settings':{},'compass':{}}
+    state={'path':str(folder/'data.sqlite3'),'lock':threading.RLock(),'meta':{},'directory':[],'sp500':{},'settings':{},'compass':{},'jobs':{}}
     with sqlite3.connect(state['path']) as db:
         db.execute('CREATE TABLE IF NOT EXISTS data(key TEXT PRIMARY KEY,payload TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS stocks(symbol TEXT PRIMARY KEY,payload TEXT)')
+        # One-time migration. Leave existing per-symbol rows authoritative.
+        legacy=db.execute("SELECT payload FROM data WHERE key='records'").fetchone()
+        if legacy:
+            records=json.loads(legacy[0])
+            for symbol,record in records.items():db.execute('INSERT OR IGNORE INTO stocks VALUES (?,?)',(symbol,json.dumps(record)))
+            db.execute("DELETE FROM data WHERE key='records'")
+            del records,legacy
         for key,payload in db.execute('SELECT key,payload FROM data'):
             try:state[key]=json.loads(payload)
             except Exception:pass
+    state['records']=USFastDiskRecords(state['path'],state['lock'])
+    state['update_lock']=threading.Lock()
     return state
+
 
 def usf_save(state,*keys):
     import sqlite3
     with state['lock'],sqlite3.connect(state['path'],timeout=30) as db:
-        for key in keys:db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(key,json.dumps(state[key])))
+        for key in keys:
+            if key!='records':db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(key,json.dumps(state[key])))
+
+
+def usf_supported_equity(symbol,company=''):
+    symbol=str(symbol).strip().upper();name=str(company).lower()
+    if not re.fullmatch(r'[A-Z0-9]+(?:[.-][AB])?',symbol):return False
+    if re.search(r'\b(?:warrants?|preferred|preference|units?|rights|debentures?|notes)\b|depositary shares',name):return False
+    return True
+
 
 def usf_restore(state):
     for key,default in USF_DEFAULTS.items():
@@ -3088,45 +3126,59 @@ def usf_directory(state,force=False):
     usf_save(state,'directory','sp500','meta')
 
 def usf_universe(state,name):
-    if name=='S&P 500':return sorted(state['sp500'])
-    return sorted({r['Ticker'] for r in state['directory'] if name=='All NYSE + Nasdaq' or r['Exchange']==name})
+    if name=='S&P 500':return sorted(s for s in state['sp500'] if usf_supported_equity(s,state['meta'].get(s,{}).get('company','')))
+    return sorted({r['Ticker'] for r in state['directory'] if (name=='All NYSE + Nasdaq' or r['Exchange']==name) and usf_supported_equity(r.get('Symbol',r['Ticker']),r.get('Company',''))})
 
 def usf_update_prices(state,symbols,full=False):
-    progress=st.progress(0.0);label=st.empty();updated=0;missing=[]
-    # Refresh the short overlap for saved histories. Full rebuild is available for corrections.
-    groups={}
-    for symbol in symbols:
-        entry=state['records'].get(symbol,{});last=entry.get('record',{}).get('last_date')
-        start=(pd.Timestamp(last)-pd.Timedelta(days=7)).date().isoformat() if last and entry.get('full') and not full else None
-        groups.setdefault(start,[]).append(symbol)
-    done=0
+    import hashlib,time
+    if not state['update_lock'].acquire(blocking=False):st.info('A US price update is already running. Saved results remain available.');return
+    progress=st.progress(0.0);label=st.empty();updated=0;missing=[];started=time.monotonic()
     try:
-        for start,group in groups.items():
-            for offset in range(0,len(group),60):
-                batch=group[offset:offset+60];opts={'start':start} if start else {'period':'5y'}
+        symbols=sorted(set(s for s in symbols if usf_supported_equity(s,state['meta'].get(s,{}).get('company',''))))
+        signature=hashlib.sha256(repr((symbols,full)).encode()).hexdigest()[:16]
+        key=datetime.now(ZoneInfo('America/New_York')).date().isoformat()+':'+signature
+        job=state.setdefault('jobs',{}).setdefault(key,{'cursor':0,'failed':[]})
+        cursor=int(job['cursor'])
+        if cursor>=len(symbols):st.info('This update pass is complete. Saved results are shown. Use Start a fresh US update to check again.');return
+        stop=min(cursor+120,len(symbols));initial=cursor
+        while cursor<stop:
+            batch=symbols[cursor:min(cursor+20,stop)];groups={}
+            for symbol in batch:
+                entry=state['records'].get(symbol,{}) or {};last=entry.get('record',{}).get('last_date')
+                start=(pd.Timestamp(last)-pd.Timedelta(days=7)).date().isoformat() if last and entry.get('full') and not full else None
+                groups.setdefault(start,[]).append(symbol)
+            for start,group in groups.items():
+                opts={'start':start} if start else {'period':'5y'}
                 try:
-                    raw=yf.download(batch,interval='1d',auto_adjust=False,group_by='ticker',threads=4,progress=False,timeout=15,**opts)
-                    for symbol in batch:
+                    raw=yf.download(group,interval='1d',auto_adjust=False,group_by='ticker',threads=2,progress=False,timeout=10,**opts)
+                    for symbol in group:
                         try:
                             if isinstance(raw.columns,pd.MultiIndex):frame=raw[symbol] if symbol in raw.columns.get_level_values(0) else raw.xs(symbol,axis=1,level=1)
-                            else:frame=raw
+                            elif len(group)==1:frame=raw
+                            else:raise ValueError('Ambiguous multi-stock response')
                             frame=frame.dropna(subset=['Close'])
                             if frame.empty:missing.append(symbol);continue
                             record=market_cache_merge(None,frame,datetime.now(ZoneInfo('Asia/Kolkata')).isoformat());record['ohlc']=[];record['volumes']=[]
                             for stamp,row in frame.iterrows():
-                                values=[float(row[c]) for c in ['Open','High','Low','Close']]
-                                day=pd.Timestamp(stamp).date().isoformat()
+                                values=[float(row[c]) for c in ['Open','High','Low','Close']];day=pd.Timestamp(stamp).date().isoformat()
                                 if all(np.isfinite(v) and v>0 for v in values):record['ohlc'].append([day,*values])
                                 volume=row.get('Volume')
                                 if volume is not None and pd.notna(volume):record['volumes'].append([day,int(volume)])
                             state['records'][symbol]=fast_percentage_merge(None if full else state['records'].get(symbol),record,full=start is None);updated+=1
                         except Exception:missing.append(symbol)
-                    usf_save(state,'records')
                 except Exception as exc:
-                    st.warning('US price batch failed; saved data retained: '+str(exc));missing.extend(batch)
-                done+=len(batch);progress.progress(done/max(len(symbols),1));label.caption(f'US stocks checked: {done:,}/{len(symbols):,} · {updated:,} updated')
-    finally:progress.empty();label.empty()
-    if missing:st.warning(f'{len(set(missing)):,} stocks returned no usable price data. Saved values remain; check the dates.')
+                    st.warning('US batch unavailable; previous prices kept: '+str(exc));missing.extend(group)
+            cursor+=len(batch);job['cursor']=cursor;job['failed']=sorted(set(job.get('failed',[])+missing))
+            # Keep only recent job metadata. Histories are saved separately as each stock succeeds.
+            state['jobs']={k:v for k,v in state['jobs'].items() if k[:10]>=key[:10]};usf_save(state,'jobs')
+            progress.progress(cursor/max(len(symbols),1));label.caption(f'US update: {cursor:,}/{len(symbols):,} checked · {updated:,} saved this click')
+            if time.monotonic()-started>=35:break
+        st.success(f'{updated:,} stocks saved. Progress: {cursor:,}/{len(symbols):,}.')
+        if cursor<len(symbols):st.info('Click Update US prices again to continue from this position. No automatic full-market loop runs.')
+        if missing:st.warning(f'{len(set(missing)):,} stocks unavailable this pass; existing prices kept. A fresh pass can retry them.')
+    finally:
+        progress.empty();label.empty();state['update_lock'].release()
+
 
 def usf_update_details(state,symbols):
     from concurrent.futures import ThreadPoolExecutor,as_completed
@@ -3207,7 +3259,10 @@ def render_usf_percentage(state):
     cap_group=st.session_state['usf_cap_group']
     st.caption('USD: Mega ≥ $200bn · Large $10–200bn · Mid $2–10bn · Small $300m–2bn · Micro below $300m (includes nano). All includes stocks with unavailable market cap.')
     c=st.columns(2);sort=c[0].selectbox('Sort by',['Percentage Change','Market Cap'],key='usf_sort',on_change=usf_settings_changed);order=c[1].selectbox('Order',['High → Low','Low → High'],key='usf_order',on_change=usf_settings_changed)
-    symbols=usf_universe(state,group);c=st.columns(3)
+    symbols=usf_universe(state,group)
+    if st.button('Start a fresh US update / retry unavailable stocks',key='usf_new_pass'):
+        state['jobs']={};usf_save(state,'jobs');st.info('Progress reset. Saved prices kept. Click Update US prices to begin a fresh pass.')
+    c=st.columns(3)
     if c[0].button('Update US prices',type='primary',key='usf_update'):
         with loading_stopwatch('Updating US Fast cache…'):usf_update_prices(state,symbols)
     if c[1].button('Reload US directory',key='usf_dir'):
@@ -3215,7 +3270,7 @@ def render_usf_percentage(state):
         except Exception as exc:st.warning(str(exc))
     if c[2].button('Rebuild full price history',key='usf_full'):
         with loading_stopwatch('Rebuilding five-year US histories…'):usf_update_prices(state,symbols,full=True)
-    st.caption(f'{len(symbols):,} listed symbols selected · first build downloads five years; later updates merge recent sessions. All NYSE/Nasdaq can take several minutes and providers may limit requests. ETFs/test symbols excluded; preferred shares and warrants can remain.')
+    st.caption(f'{len(symbols):,} listed symbols selected · ordinary-share candidates · up to 120 symbols per click, in 20-stock batches; click again to resume. First histories use five years; later updates merge recent sessions. Unsupported symbol formats, preferred securities, units, warrants and rights are excluded. Saved results work independently of updates.')
     frame=usf_rows(state,symbols,period)
     if frame.empty:st.info('Click Update US prices once. No Indian cache is used.');return
     result=nse_percentage_filter(frame,direction,threshold).copy();query=st.text_input('Find stock / sector',key='usf_search').lower()
@@ -3368,15 +3423,204 @@ def render_us_fast():
     else:render_usf_compass(state)
 
 
+# Dividend is independent of Fast percentage and only runs when its View is selected.
+@st.cache_resource(show_spinner=False)
+def fd_store():
+    import sqlite3
+    folder=Path('.nse_dividend');folder.mkdir(exist_ok=True)
+    state={'path':str(folder/'data.sqlite3'),'lock':threading.RLock(),'values':{}}
+    with sqlite3.connect(state['path']) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS data(key TEXT PRIMARY KEY,payload TEXT)')
+        for key,payload in db.execute('SELECT key,payload FROM data'):
+            try:state['values'][key]=json.loads(payload)
+            except Exception:pass
+    return state
+
+
+def fd_put(state,key,value):
+    import sqlite3
+    with state['lock'],sqlite3.connect(state['path'],timeout=30) as db:
+        db.execute('INSERT OR REPLACE INTO data VALUES (?,?)',(key,json.dumps(value)))
+        state['values'][key]=value
+
+
+def fd_normalize(raw):
+    result={}
+    for row in raw:
+        purpose=str(row.get('subject') or row.get('PURPOSE') or row.get('Purpose') or '')
+        if not re.search('dividend',purpose,re.I):continue
+        stamp=str(row.get('exDate') or row.get('EX-DATE') or row.get('Ex-Date') or '').strip()
+        parsed=None
+        for fmt in ['%d-%b-%Y','%d-%m-%Y','%d/%m/%Y','%Y-%m-%d']:
+            try:parsed=datetime.strptime(stamp,fmt).date().isoformat();break
+            except ValueError:pass
+        symbol=str(row.get('symbol') or row.get('SYMBOL') or row.get('Symbol') or '').strip().upper()
+        if not parsed or not re.fullmatch(r'[A-Z0-9&_\-]{1,30}',symbol):continue
+        amounts=re.findall(r'(?:rs\.?|re\.?|inr|₹)\s*([\d,]+(?:\.\d+)?)',purpose,re.I)
+        amount=sum(float(v.replace(',','')) for v in amounts)
+        # Percentage-only dividends remain visible, but are never guessed from face value.
+        key=symbol+'|'+parsed
+        result[key]={'id':key,'symbol':symbol,'company':str(row.get('comp') or row.get('companyName') or row.get('COMPANY NAME') or symbol),'date':parsed,'dividend':amount if amount>0 else None,'purpose':purpose}
+    return sorted(result.values(),key=lambda r:(r['date'],r['company']))
+
+
+def fd_fetch_month(year,month):
+    import calendar
+    first=date(year,month,1);last=date(year,month,calendar.monthrange(year,month)[1])
+    url='https://www.nseindia.com/api/corporates-corporateActions'
+    response=requests.get(url,params={'index':'equities','from_date':first.strftime('%d-%m-%Y'),'to_date':last.strftime('%d-%m-%Y')},headers=HEADERS,timeout=(4,12))
+    response.raise_for_status();raw=response.json()
+    if not isinstance(raw,list):raise ValueError('NSE response format changed; import the official CSV.')
+    return {'rows':[r for r in fd_normalize(raw) if first.isoformat()<=r['date']<=last.isoformat()],'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'origin':'NSE online corporate actions'}
+
+
+def fd_part(frame,ticker,count):
+    if isinstance(frame.columns,pd.MultiIndex):
+        return frame[ticker] if ticker in frame.columns.get_level_values(0) else frame.xs(ticker,axis=1,level=1)
+    if count==1:return frame
+    return pd.DataFrame()
+
+
+def fd_update_quotes(state,rows):
+    # Explicit button only; at most 20 symbols, two small daily-price windows.
+    symbols=sorted({r['symbol'] for r in rows})[:20]
+    if not symbols:return
+    first=min(date.fromisoformat(r['date']) for r in rows);last=max(date.fromisoformat(r['date']) for r in rows);today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    tickers=[s+'.NS' for s in symbols];history=pd.DataFrame();latest=pd.DataFrame()
+    if first<=today:
+        history=yf.download(tickers,start=first-timedelta(days=12),end=min(last,today)+timedelta(days=1),auto_adjust=False,group_by='ticker',threads=2,progress=False,timeout=10)
+    latest=yf.download(tickers,period='5d',auto_adjust=False,group_by='ticker',threads=2,progress=False,timeout=10)
+    quotes=dict(state['values'].get('quotes',{}));count=0
+    for r in rows:
+        if r['symbol'] not in symbols:continue
+        try:
+            part=fd_part(latest,r['symbol']+'.NS',len(symbols));close=pd.to_numeric(part['Close'],errors='coerce').dropna()
+            if close.empty:continue
+            q={'latest':float(close.iloc[-1]),'price_date':pd.Timestamp(close.index[-1]).date().isoformat(),'fetched':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()}
+            if not history.empty:
+                past=fd_part(history,r['symbol']+'.NS',len(symbols));past=pd.to_numeric(past['Close'],errors='coerce').dropna()
+                past=past[[pd.Timestamp(d).date().isoformat()<r['date'] for d in past.index]]
+                if not past.empty:q.update(buy=float(past.iloc[-1]),buy_date=pd.Timestamp(past.index[-1]).date().isoformat())
+            quotes[r['id']]={**quotes.get(r['id'],{}),**q};count+=1
+        except Exception:continue
+    fd_put(state,'quotes',quotes)
+    st.info(str(count)+' event quotes saved. Prices are available daily closes, not streaming quotes. Unavailable symbols keep their saved prices.')
+
+
+def fd_calculate(dividend,buy,current,purchase_date,ex_date,mode,value,cost):
+    valid=lambda x:x is not None and np.isfinite(float(x)) and float(x)>0
+    qty=None
+    if mode=='Shares':qty=max(0,int(value))
+    elif mode=='Investment' and valid(buy):qty=max(0,int(float(value)//float(buy)))
+    elif mode=='Dividend goal' and valid(dividend):qty=max(0,int(np.ceil(float(value)/float(dividend))))
+    invested=qty*buy if qty is not None and valid(buy) else None
+    entitlement=qty*dividend if qty is not None and valid(dividend) and purchase_date and purchase_date<ex_date else None
+    price_pl=(current-buy)*qty if qty is not None and valid(buy) and valid(current) else None
+    combined=price_pl+entitlement-cost if price_pl is not None and entitlement is not None else None
+    return qty,invested,entitlement,price_pl,combined
+
+
+def render_fast_dividend():
+    import calendar
+    state=fd_store();today=datetime.now(ZoneInfo('Asia/Kolkata')).date()
+    st.markdown('### 💰 Dividend · Calendar & Calculator')
+    cols=st.columns([1,2,2,1])
+    year=int(cols[0].number_input('Year',min_value=2000,max_value=2100,value=today.year,key='fd_year'))
+    month=cols[1].selectbox('Month',range(1,13),index=today.month-1,format_func=lambda m:calendar.month_name[m],key='fd_month')
+    window=cols[2].selectbox('Period',['Month','1 Week','2 Weeks','3 Weeks','Custom'],key='fd_window')
+    refresh=cols[3].button('↻ Refresh calendar',key='fd_refresh')
+    start=date(year,month,1);end=date(year,month,calendar.monthrange(year,month)[1]);prefix=start.strftime('%Y-%m');key='month:'+prefix
+    data=state['values'].get(key)
+    attempt=state['values'].get('attempt:'+prefix,{})
+    if refresh or (data is None and (not attempt or time.time()-attempt.get('time',0)>300)):
+        with loading_stopwatch('Loading selected month’s announced dividends…'):
+            try:
+                fresh=fd_fetch_month(year,month);fd_put(state,key,fresh);data=fresh;fd_put(state,'attempt:'+prefix,{'time':time.time()})
+            except Exception as exc:fd_put(state,'attempt:'+prefix,{'time':time.time(),'error':str(exc)})
+    attempt=state['values'].get('attempt:'+prefix,{})
+    if attempt.get('error'):st.warning('Online update failed: '+attempt['error']+'. Saved records below are not a fresh update. Use official CSV import if needed.')
+    with st.expander('Import official NSE corporate-actions CSV'):
+        st.link_button('Open NSE corporate actions / Download CSV','https://www.nseindia.com/companies-listing/corporate-filings-actions')
+        upload=st.file_uploader('NSE CSV file',type=['csv'],key='fd_upload')
+        if st.button('Save dividend CSV',disabled=upload is None,key='fd_import'):
+            try:
+                frame=pd.read_csv(upload,encoding='utf-8-sig');frame.columns=[str(c).strip() for c in frame.columns]
+                records=fd_normalize(frame.to_dict('records'))
+                if not records:raise ValueError('No valid dividend rows found. Check SYMBOL, PURPOSE and EX-DATE columns.')
+                for period in sorted({r['date'][:7] for r in records}):
+                    old=state['values'].get('month:'+period,{})
+                    merged={r['id']:r for r in old.get('rows',[])};merged.update({r['id']:r for r in records if r['date'].startswith(period)})
+                    fd_put(state,'month:'+period,{'rows':list(merged.values()),'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'origin':'Imported official CSV + saved records'})
+                data=state['values'].get(key);st.success('Imported '+str(len(records))+' dividend records. Select their month to view.')
+            except Exception as exc:st.error('Import failed: '+str(exc))
+    st.caption((data or {}).get('origin','No data loaded')+' · Last fetch/import: '+(datetime.fromisoformat(data['updated']).strftime('%d/%m/%Y %H:%M IST') if data and data.get('updated') else 'Unavailable')+' · Future months contain announced dividends only. Empty / failed data is not proof that no dividends exist.')
+    rows=(data or {}).get('rows',[])
+    rstart,rend=start,end
+    if window!='Month':
+        c=st.columns(2);rstart=c[0].date_input('Period starts',value=start,min_value=start,max_value=end,format='DD/MM/YYYY',key='fd_start_'+prefix)
+        rend=c[1].date_input('Period ends',value=end,min_value=rstart,max_value=end,format='DD/MM/YYYY',key='fd_end_'+prefix) if window=='Custom' else min(end,rstart+timedelta(days=int(window[0])*7-1))
+    selected=st.session_state.get('fd_day','')
+    if not selected.startswith(prefix):selected=''
+    st.caption('Click a day for its companies. Calendar counts are dividend events, not trading recommendations.')
+    for col,label in zip(st.columns(7),['Sun','Mon','Tue','Wed','Thu','Fri','Sat']):col.markdown('**'+label+'**')
+    for week in calendar.Calendar(firstweekday=6).monthdayscalendar(year,month):
+        for col,day in zip(st.columns(7),week):
+            if day:
+                stamp=date(year,month,day).isoformat();count=sum(r['date']==stamp for r in rows)
+                if col.button(str(day)+' · '+str(count),key='fd_day_'+stamp,type='primary' if selected==stamp else 'secondary',use_container_width=True):st.session_state['fd_day']=stamp;st.rerun()
+    if st.button('Show whole selected period',key='fd_clear'):st.session_state['fd_day']='';st.rerun()
+    visible=[r for r in rows if rstart.isoformat()<=r['date']<=rend.isoformat() and (not selected or r['date']==selected)]
+    search=st.text_input('Find company / symbol',key='fd_search').strip().lower()
+    if search:visible=[r for r in visible if search in (r['company']+' '+r['symbol']).lower()]
+    st.markdown('#### '+str(len(visible))+' dividend events'+(' · '+date.fromisoformat(selected).strftime('%d/%m/%Y') if selected else ''))
+    if not visible:st.info('No loaded dividend records match this selection.');return
+    if st.button('↻ Update displayed prices · up to 20 symbols',key='fd_prices'):
+        try:
+            with loading_stopwatch('Fetching daily closing prices…'):fd_update_quotes(state,visible)
+        except Exception as exc:st.warning('Price update failed; saved prices kept: '+str(exc))
+    st.caption('For more than 20 symbols, narrow by date/company before updating. Purchase reference = last available close before ex-date; it is not your actual execution price. Edit it below.')
+    settings=state['values'].get('calculator',{})
+    modes=['Investment','Shares','Dividend goal'];c=st.columns(2)
+    mode=c[0].selectbox('Apply to each company',modes,index=modes.index(settings.get('mode','Investment')),key='fd_mode')
+    value=c[1].number_input('Shares per company' if mode=='Shares' else 'Amount per company ₹',min_value=0.0,value=float(settings.get('value',10000)),step=1.0 if mode=='Shares' else 1000.0,key='fd_value')
+    if settings!={'mode':mode,'value':value}:fd_put(state,'calculator',{'mode':mode,'value':value})
+    edits=state['values'].get('edits',{});quotes=state['values'].get('quotes',{});input_rows=[]
+    for r in visible:
+        e=edits.get(r['id'],{});q=quotes.get(r['id'],{})
+        input_rows.append({'ID':r['id'],'Company':r['company'],'Symbol':r['symbol'],'Ex Date':date.fromisoformat(r['date']),'Dividend ₹':r['dividend'],'Purchase ₹':e.get('buy',q.get('buy')),'Current ₹':e.get('current',q.get('latest')),'Purchase Date':date.fromisoformat(e['purchase_date']) if e.get('purchase_date') else None,'Charges ₹':float(e.get('cost',0)),'Price Date':date.fromisoformat(q['price_date']).strftime('%d/%m/%Y') if q.get('price_date') else 'Manual / unavailable'})
+    editor_key='fd_editor_'+prefix+'_'+str(selected)+'_'+str(len(visible))
+    edited=st.data_editor(pd.DataFrame(input_rows),hide_index=True,use_container_width=True,key=editor_key,disabled=['ID','Company','Symbol','Ex Date','Dividend ₹','Price Date'],column_config={'ID':None,'Ex Date':st.column_config.DateColumn(format='DD/MM/YYYY'),'Purchase Date':st.column_config.DateColumn(format='DD/MM/YYYY'),'Purchase ₹':st.column_config.NumberColumn(min_value=0.0),'Current ₹':st.column_config.NumberColumn(min_value=0.0),'Charges ₹':st.column_config.NumberColumn(min_value=0.0)})
+    if st.button('Save my purchase / price edits',key='fd_save'):
+        for _,r in edited.iterrows():
+            original=next(v for v in input_rows if v['ID']==r['ID']);entry=dict(edits.get(r['ID'],{}))
+            for field,name in [('Purchase ₹','buy'),('Current ₹','current'),('Charges ₹','cost')]:
+                v=None if pd.isna(r[field]) else float(r[field]);old=original[field]
+                if v!=old and not (v is None and old is None):entry[name]=v
+            purchase=r['Purchase Date'];entry['purchase_date']=pd.Timestamp(purchase).date().isoformat() if purchase is not None and pd.notna(purchase) else None
+            edits[r['ID']]=entry
+        fd_put(state,'edits',edits);st.success('Saved. Manual prices remain until you edit them again.')
+    output=[]
+    for i,(_,r) in enumerate(edited.iterrows(),1):
+        num=lambda v:None if pd.isna(v) else float(v)
+        purchase=pd.Timestamp(r['Purchase Date']).date().isoformat() if r['Purchase Date'] is not None and pd.notna(r['Purchase Date']) else None
+        qty,invested,entitlement,pl,net=fd_calculate(num(r['Dividend ₹']),num(r['Purchase ₹']),num(r['Current ₹']),purchase,pd.Timestamp(r['Ex Date']).date().isoformat(),mode,value,float(r['Charges ₹'] or 0))
+        output.append({'Sl No':i,'Company':r['Company'],'Ex Date':pd.Timestamp(r['Ex Date']).strftime('%d/%m/%Y'),'Shares':qty,'Investment ₹':invested,'Eligible dividend ₹':entitlement,'Price P/L ₹':pl,'Combined before tax ₹':net})
+    result=pd.DataFrame(output);st.dataframe(result,hide_index=True,use_container_width=True)
+    st.caption('Set your actual purchase date to calculate potential dividend eligibility. Combined P/L = price P/L + eligible dividend − entered charges. This is an estimate before tax, not realised profit or confirmation of settlement/entitlement. Missing inputs remain unavailable. App-local saved data is not a permanent external backup.')
+    st.download_button('Download dividend calculations',result.to_csv(index=False).encode('utf-8-sig'),'dividend_'+prefix+'.csv','text/csv',key='fd_csv')
+
+
 def render_fast_percentage():
     st.markdown('## ⚡ Fast')
+    view=st.radio('View',['By Percentage','By Stock','🧭 Market Compass','💰 Dividend'],horizontal=True,key='fast_view')
+    if view=='💰 Dividend':
+        render_fast_dividend();return
+    if view=='🧭 Market Compass':
+        render_fast_market_compass();return
     st.caption('Separate trial page. Filters use precomputed saved returns and make no market-data requests. Prices update only when you click Update prices.')
     store=fast_percentage_store()
     fast_restore_settings(store)
     fast_percentage_ensure_periods(store)
-    view=st.radio('View',['By Percentage','By Stock','🧭 Market Compass'],horizontal=True,key='fast_view')
-    if view=='🧭 Market Compass':
-        render_fast_market_compass();return
     if view=='By Stock':
         render_fast_by_stock(store);return
     controls=st.columns([2,2,1,1])
