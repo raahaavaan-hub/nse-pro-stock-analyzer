@@ -158,291 +158,53 @@ def loading_stopwatch(message):
 
 # -----------------------------------------------------------------------------
 
-st.markdown("""
+st.markdown("""&lt;style&gt;
 
-&lt;style&gt;
+[data-testid="stAppViewContainer"]{background:linear-gradient(180deg,#07101d,#0a1422);color:#f8fafc;}
 
-[data-testid=&quot;stAppViewContainer&quot;] {
+[data-testid="stSidebar"]{background:#0b1421;border-right:1px solid #1e293b;}
 
-    background: linear-gradient(180deg, #07101d, #0a1422);
+.block-container{max-width:1550px;padding-top:1.2rem;padding-bottom:2rem;}
 
-    color: #f8fafc;
+.hero{padding:24px 28px;border:1px solid #1e293b;border-radius:18px;background:radial-gradient(circle at 85% 20%,#1d4ed833,transparent 40%),#0b1523;margin-bottom:20px;}
 
-}
+.hero h1{font-size:34px;font-weight:800;margin:4px 0 6px;letter-spacing:-0.5px;}
 
-[data-testid=&quot;stSidebar&quot;] {
+.hero p{color:#94a3b8;font-size:14px;margin:0;}
 
-    background: #0b1421;
+.eyebrow{font-size:11px;color:#38bdf8;letter-spacing:2px;font-weight:800;text-transform:uppercase;}
 
-    border-right: 1px solid #1e293b;
+.kpi{padding:16px 18px;border-radius:14px;background:#0d1726;border:1px solid #1e293b;min-height:105px;display:flex;flex-direction:column;justify-content:space-between;}
 
-}
+.kpi span{font-size:11px;color:#7f91a8;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;}
 
-.block-container {
+.kpi b{display:block;font-size:24px;font-weight:800;margin:4px 0;}
 
-    max-width: 1550px;
+.kpi small{font-size:11px;color:#94a3b8;}
 
-    padding-top: 1.2rem;
+.card{padding:20px;border-radius:16px;background:#0b1523;border:1px solid #1e293b;margin-bottom:16px;}
 
-    padding-bottom: 2rem;
+.score-panel{background:#0b1523;border:1px solid #1e293b;border-radius:16px;padding:18px;margin-bottom:14px;}
 
-}
+.score-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
 
-.hero {
+.score-pill{padding:6px 14px;border-radius:999px;background:#172554;color:#bfdbfe;font-weight:800;font-size:14px;border:1px solid #1e40af;}
 
-    padding: 24px 28px;
+.check-row{display:grid;grid-template-columns:24px 1fr auto;gap:10px;align-items:center;padding:9px 8px;border-bottom:1px solid #182334;font-size:12px;}
 
-    border: 1px solid #1e293b;
+.check-row:last-child{border-bottom:0;}
 
-    border-radius: 18px;
+.news-card{padding:16px;border-radius:14px;background:#0b1523;border:1px solid #1e293b;height:100%;display:flex;flex-direction:column;justify-content:space-between;}
 
-    background: radial-gradient(circle at 85% 20%, #1d4ed833, transparent 40%), #0b1523;
+.news-card h4{margin:6px 0 8px;font-size:14px;font-weight:600;color:#f1f5f9;}
 
-    margin-bottom: 20px;
+.news-card p{font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:10px;}
 
-}
+.news-card a{font-size:11px;color:#38bdf8;text-decoration:none;font-weight:600;}
 
-.hero h1 {
+.news-meta{font-size:10px;color:#64748b;margin-bottom:4px;}
 
-    font-size: 34px;
-
-    font-weight: 800;
-
-    margin: 4px 0 6px;
-
-    letter-spacing: -0.5px;
-
-}
-
-.hero p {
-
-    color: #94a3b8;
-
-    font-size: 14px;
-
-    margin: 0;
-
-}
-
-.eyebrow {
-
-    font-size: 11px;
-
-    color: #38bdf8;
-
-    letter-spacing: 2px;
-
-    font-weight: 800;
-
-    text-transform: uppercase;
-
-}
-
-.kpi {
-
-    padding: 16px 18px;
-
-    border-radius: 14px;
-
-    background: #0d1726;
-
-    border: 1px solid #1e293b;
-
-    min-height: 105px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    justify-content: space-between;
-
-}
-
-.kpi span {
-
-    font-size: 11px;
-
-    color: #7f91a8;
-
-    font-weight: 700;
-
-    text-transform: uppercase;
-
-    letter-spacing: 0.5px;
-
-}
-
-.kpi b {
-
-    display: block;
-
-    font-size: 24px;
-
-    font-weight: 800;
-
-    margin: 4px 0;
-
-}
-
-.kpi small {
-
-    font-size: 11px;
-
-    color: #94a3b8;
-
-}
-
-.card {
-
-    padding: 20px;
-
-    border-radius: 16px;
-
-    background: #0b1523;
-
-    border: 1px solid #1e293b;
-
-    margin-bottom: 16px;
-
-}
-
-.score-panel {
-
-    background: #0b1523;
-
-    border: 1px solid #1e293b;
-
-    border-radius: 16px;
-
-    padding: 18px;
-
-    margin-bottom: 14px;
-
-}
-
-.score-head {
-
-    display: flex;
-
-    justify-content: space-between;
-
-    align-items: center;
-
-    margin-bottom: 14px;
-
-}
-
-.score-pill {
-
-    padding: 6px 14px;
-
-    border-radius: 999px;
-
-    background: #172554;
-
-    color: #bfdbfe;
-
-    font-weight: 800;
-
-    font-size: 14px;
-
-    border: 1px solid #1e40af;
-
-}
-
-.check-row {
-
-    display: grid;
-
-    grid-template-columns: 24px 1fr auto;
-
-    gap: 10px;
-
-    align-items: center;
-
-    padding: 9px 8px;
-
-    border-bottom: 1px solid #182334;
-
-    font-size: 12px;
-
-}
-
-.check-row:last-child {
-
-    border-bottom: 0;
-
-}
-
-.news-card {
-
-    padding: 16px;
-
-    border-radius: 14px;
-
-    background: #0b1523;
-
-    border: 1px solid #1e293b;
-
-    height: 100%;
-
-    display: flex;
-
-    flex-direction: column;
-
-    justify-content: space-between;
-
-}
-
-.news-card h4 {
-
-    margin: 6px 0 8px;
-
-    font-size: 14px;
-
-    font-weight: 600;
-
-    color: #f1f5f9;
-
-}
-
-.news-card p {
-
-    font-size: 11px;
-
-    color: #94a3b8;
-
-    line-height: 1.5;
-
-    margin-bottom: 10px;
-
-}
-
-.news-card a {
-
-    font-size: 11px;
-
-    color: #38bdf8;
-
-    text-decoration: none;
-
-    font-weight: 600;
-
-}
-
-.news-meta {
-
-    font-size: 10px;
-
-    color: #64748b;
-
-    margin-bottom: 4px;
-
-}
-
-&lt;/style&gt;
-
-""", unsafe_allow_html=True)
+&lt;/style&gt;""", unsafe_allow_html=True)
 
 
 
@@ -2080,17 +1842,7 @@ def render_sector_page():
 
 def main():
 
-    st.sidebar.markdown("""
-
-    &lt;div style=&quot;padding:10px 0 20px;&quot;&gt;
-
-        &lt;h2 style=&quot;margin:0;font-size:22px;color:#38bdf8;&quot;&gt;📈 NSE Terminal&lt;/h2&gt;
-
-        &lt;span style=&quot;font-size:11px;color:#64748b;font-weight:700;&quot;&gt;PRO EDITION V14&lt;/span&gt;
-
-    &lt;/div&gt;
-
-    """, unsafe_allow_html=True)
+    st.sidebar.markdown("""&lt;div style=&quot;padding:10px 0 20px;&quot;&gt;&lt;h2 style=&quot;margin:0;font-size:22px;color:#38bdf8;&quot;&gt;📈 NSE Terminal&lt;/h2&gt;&lt;span style=&quot;font-size:11px;color:#64748b;font-weight:700;&quot;&gt;PRO EDITION V14&lt;/span&gt;&lt;/div&gt;""", unsafe_allow_html=True)
 
 
 
@@ -2116,37 +1868,23 @@ def main():
 
     st.sidebar.markdown("---")
 
-    st.sidebar.markdown("""
-
-    <div style="font-size:11px;color:#64748b;line-height:1.6;">
-
-        <b>Engine Status:</b> Connected<br>
-
-        <b>Data Feeds:</b> NSE Archives & Yahoo Finance<br>
-
-        <b>US S&P 500:</b> Live Synced<br>
-
-        <b>Cache TTL:</b> 15 Mins
-
-    </div>
-
-    """, unsafe_allow_html=True)
+    st.sidebar.markdown("""<div style="font-size:11px;color:#64748b;line-height:1.6;"><b>Engine Status:</b> Connected<br><b>Data Feeds:</b> NSE Archives & Yahoo Finance<br><b>US S&P 500:</b> Live Synced<br><b>Cache TTL:</b> 15 Mins</div>""", unsafe_allow_html=True)
 
 
 
-    if page == "📊 NSE Stock Terminal":
+    if "NSE" in page:
 
         render_nse_stock_page()
 
-    elif page == "🇺🇸 US Markets Terminal":
+    elif "US" in page:
 
         render_us_market_page()
 
-    elif page == "🔍 Market Screeners":
+    elif "Screener" in page:
 
         render_screeners_page()
 
-    elif page == "🗺️ Sector Matrix":
+    elif "Sector" in page:
 
         render_sector_page()
 
