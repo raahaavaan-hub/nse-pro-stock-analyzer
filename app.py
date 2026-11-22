@@ -4061,10 +4061,72 @@ def fq_indian_q_label(label):
         return txt
 
 
+def fq_quarter_tag(label):
+    txt = str(label or "").strip()
+    try:
+        dt = datetime.strptime(txt, "%b %Y")
+        return {4: "Q1", 5: "Q1", 6: "Q1", 7: "Q2", 8: "Q2", 9: "Q2", 10: "Q3", 11: "Q3", 12: "Q3", 1: "Q4", 2: "Q4", 3: "Q4"}[dt.month]
+    except Exception:
+        return ""
+
+
+def fq_pick_quarterly_pair(quarters, revs, pats, compare_mode="YoY", custom_base=None, custom_target=None):
+    if not quarters:
+        return "—", "—", None, None, None, None
+    new_i = None
+    prev_i = None
+
+    if compare_mode == "Custom" and custom_base and custom_target:
+        if custom_target in quarters:
+            new_i = quarters.index(custom_target)
+        if custom_base in quarters:
+            prev_i = quarters.index(custom_base)
+    elif compare_mode in ("Q1 → Q2", "Q2 → Q3", "Q3 → Q4", "Q4 → Q1"):
+        base_q, target_q = [x.strip() for x in compare_mode.split("→")]
+        for i, q in enumerate(quarters):
+            if fq_quarter_tag(q) == target_q:
+                r_v = revs[i] if i < len(revs) else None
+                p_v = pats[i] if i < len(pats) else None
+                if r_v is not None or p_v is not None:
+                    new_i = i
+                    break
+        if new_i is not None:
+            for j in range(new_i + 1, len(quarters)):
+                if fq_quarter_tag(quarters[j]) == base_q:
+                    prev_i = j
+                    break
+    elif compare_mode == "QoQ":
+        for i in range(len(quarters)):
+            r_v = revs[i] if i < len(revs) else None
+            p_v = pats[i] if i < len(pats) else None
+            if r_v is not None or p_v is not None:
+                new_i = i
+                break
+        if new_i is not None and (new_i + 1) < len(quarters):
+            prev_i = new_i + 1
+    else:
+        for i in range(len(quarters)):
+            r_v = revs[i] if i < len(revs) else None
+            p_v = pats[i] if i < len(pats) else None
+            if r_v is not None or p_v is not None:
+                new_i = i
+                break
+        if new_i is not None:
+            prev_i = fq_yoy_match_index(quarters, new_i)
+
+    new_p = fq_indian_q_label(quarters[new_i]) if new_i is not None and new_i < len(quarters) else "—"
+    prev_p = fq_indian_q_label(quarters[prev_i]) if prev_i is not None and prev_i < len(quarters) else "—"
+    new_rev = revs[new_i] if new_i is not None and new_i < len(revs) else None
+    prev_rev = revs[prev_i] if prev_i is not None and prev_i < len(revs) else None
+    new_pat = pats[new_i] if new_i is not None and new_i < len(pats) else None
+    prev_pat = pats[prev_i] if prev_i is not None and prev_i < len(pats) else None
+    return new_p, prev_p, new_rev, prev_rev, new_pat, prev_pat
+
+
 def render_fq_index_comparison(store):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    st.caption("View 4-quarter Net Profit & Total Revenue or compare YoY results across Nifty 50 / 100 / 200 / 500 companies.")
+    st.caption("View 5-quarter Net Profit (latest 4 quarters + 1 previous year quarter) & Total Revenue, or compare Profit/Loss across any two quarters.")
     tiers, nifty_companies = fq_nifty_tier_map()
     if not tiers:
         st.warning("Could not load Nifty index constituent lists right now. Please try again.")
@@ -4074,11 +4136,11 @@ def render_fq_index_comparison(store):
     index_choice = c1.selectbox("Nifty Universe", ["NIFTY 50", "NIFTY 100", "NIFTY 200", "NIFTY 500"], key="fq_idx_universe")
     basis = c2.selectbox(
         "View / Comparison Basis",
-        ["4-Quarter Net Profit & Revenue", "Quarterly YoY (Same Qtr Last Yr)", "Annual YoY (Prev FY vs New FY)"],
+        ["5-Quarter Net Profit & Revenue", "Quarterly Profit / Loss Comparison", "Annual YoY (Prev FY vs New FY)"],
         key="fq_idx_basis",
     )
     tier_filter = c3.selectbox("Filter Index Tier", ["All Tiers", "Nifty 50", "Nifty 100", "Nifty 200", "Nifty 500"], key="fq_idx_tier")
-    status_filter = c4.selectbox("Profit / Loss Filter", ["All", "Profit Only", "Loss Only", "Profit Increased (YoY)", "Profit Decreased (YoY)"], key="fq_idx_status")
+    status_filter = c4.selectbox("Profit / Loss Filter", ["All", "Profit Only", "Loss Only", "Profit Increased", "Profit Decreased"], key="fq_idx_status")
 
     try:
         target_symbols = nse_sector_constituents(index_choice).Symbol.astype(str).str.strip().tolist()
@@ -4120,7 +4182,49 @@ def render_fq_index_comparison(store):
             if failed:
                 st.warning(f"{failed} stocks could not be fetched from Yahoo Finance; available results are shown below.")
 
-    is_four_q = basis.startswith("4-Quarter")
+    compare_mode = "YoY"
+    custom_base = None
+    custom_target = None
+    if basis == "Quarterly Profit / Loss Comparison":
+        compare_options = [
+            "Old Qtr → New Qtr (YoY: Same Qtr Last Yr)",
+            "Prev Qtr → Latest Qtr (QoQ: Sequential)",
+            "Q1 → Q2",
+            "Q2 → Q3",
+            "Q3 → Q4",
+            "Q4 → Q1",
+            "Custom (Pick Any 2 Quarters)",
+        ]
+        cc1, cc2, cc3 = st.columns([2.4, 1.8, 1.8])
+        chosen_cmp = cc1.selectbox("Compare Which Quarters?", compare_options, key="fq_idx_cmp_mode")
+        if chosen_cmp.startswith("Old Qtr"):
+            compare_mode = "YoY"
+        elif chosen_cmp.startswith("Prev Qtr"):
+            compare_mode = "QoQ"
+        elif chosen_cmp.startswith("Custom"):
+            compare_mode = "Custom"
+            avail_q = []
+            seen_q = set()
+            for sym in target_symbols:
+                for q in (store["values"].get(sym, {}) or {}).get("quarters", []):
+                    if q not in seen_q:
+                        seen_q.add(q)
+                        avail_q.append(q)
+            def _q_sort_key(lbl):
+                try:
+                    return datetime.strptime(str(lbl).strip(), "%b %Y")
+                except Exception:
+                    return datetime.min
+            avail_q.sort(key=_q_sort_key, reverse=True)
+            if len(avail_q) >= 2:
+                custom_base = cc2.selectbox("Base Quarter (From)", avail_q, index=min(4, len(avail_q) - 1), format_func=fq_indian_q_label, key="fq_idx_custom_base")
+                custom_target = cc3.selectbox("Compare Quarter (To)", avail_q, index=0, format_func=fq_indian_q_label, key="fq_idx_custom_target")
+            elif avail_q:
+                cc2.info("Fetch data first to pick custom quarters.")
+        else:
+            compare_mode = chosen_cmp
+
+    is_five_q = basis.startswith("5-Quarter")
     rows = []
     for sym in target_symbols:
         tier_label = tiers.get(sym, index_choice.title())
@@ -4144,29 +4248,31 @@ def render_fq_index_comparison(store):
             prev_rev = revs[1] if len(revs) > 1 else None
             new_pat = pats[0] if len(pats) > 0 else None
             prev_pat = pats[1] if len(pats) > 1 else None
-            q4_slots = []
+            q5_slots = []
             rev_q_lbl = new_p
         else:
             qs = cached.get("quarters", [])
             m = cached.get("metrics", {})
             revs = m.get("Total Revenue (₹ Cr)", [])
             pats = m.get("Net Profit / PAT (₹ Cr)", [])
-            new_p, prev_p, new_rev, prev_rev, new_pat, prev_pat = fq_pick_quarterly_yoy(qs, revs, pats)
-            q4_slots = []
-            for offset in (3, 2, 1, 0):
+            new_p, prev_p, new_rev, prev_rev, new_pat, prev_pat = fq_pick_quarterly_pair(
+                qs, revs, pats, compare_mode=compare_mode, custom_base=custom_base, custom_target=custom_target
+            )
+            q5_slots = []
+            for offset in (4, 3, 2, 1, 0):
                 q_lbl = fq_indian_q_label(qs[offset]) if offset < len(qs) else "—"
                 q_pat = pats[offset] if offset < len(pats) else None
-                q4_slots.append((q_lbl, q_pat))
-            rev_q_lbl = fq_indian_q_label(new_p)
+                q5_slots.append((q_lbl, q_pat))
+            rev_q_lbl = new_p
 
         status_txt, status_col, status_cat = fq_compare_status(prev_pat, new_pat)
         if status_filter == "Profit Only" and status_cat not in ("profit", "profit_up", "profit_down"):
             continue
         if status_filter == "Loss Only" and status_cat != "loss":
             continue
-        if status_filter == "Profit Increased (YoY)" and status_cat != "profit_up":
+        if status_filter in ("Profit Increased", "Profit Increased (YoY)") and status_cat != "profit_up":
             continue
-        if status_filter == "Profit Decreased (YoY)" and status_cat != "profit_down":
+        if status_filter in ("Profit Decreased", "Profit Decreased (YoY)") and status_cat != "profit_down":
             continue
 
         rev_pct = fq_pct_change(new_rev, prev_rev)
@@ -4185,7 +4291,7 @@ def render_fq_index_comparison(store):
             "new_pat": new_pat,
             "rev_pct": rev_pct,
             "pat_pct": pat_pct,
-            "q4_slots": q4_slots,
+            "q5_slots": q5_slots,
             "rev_q_lbl": rev_q_lbl,
             "sort_pat": sort_pat_val,
             "sort_rev": sort_rev_val,
@@ -4211,7 +4317,7 @@ def render_fq_index_comparison(store):
     k1.metric("Companies Shown", f"{len(rows):,}")
     k2.metric("In Profit", f"{sum(1 for r in rows if r['status_cat'] in ('profit', 'profit_up', 'profit_down')):,}")
     k3.metric("In Loss", f"{sum(1 for r in rows if r['status_cat'] == 'loss'):,}")
-    k4.metric("Profit Increased YoY", f"{sum(1 for r in rows if r['status_cat'] == 'profit_up'):,}")
+    k4.metric("Profit Increased", f"{sum(1 for r in rows if r['status_cat'] == 'profit_up'):,}")
 
     def fmt_cr(v):
         return f"₹{v:,.2f}" if v is not None and np.isfinite(v) else "—"
@@ -4232,11 +4338,11 @@ def render_fq_index_comparison(store):
 
     body_html = []
     export_list = []
-    if is_four_q:
+    if is_five_q:
         for idx, r in enumerate(rows, start=1):
             tier_bg = {"Nifty 50": "#1d4ed8", "Nifty 100": "#0f766e", "Nifty 200": "#7c3aed", "Nifty 500": "#475569"}.get(r["tier"], "#334155")
             tier_badge = f"<span style='background:{tier_bg};color:#fff;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap'>{html.escape(r['tier'])}</span>"
-            slots = r["q4_slots"]
+            slots = r["q5_slots"]
             q_cells = "".join(f"<td>{fmt_pat_cell(q_pat, q_lbl)}</td>" for q_lbl, q_pat in slots)
             rev_cell = f"<span style='font-weight:700'>{fmt_cr(r['new_rev'])}</span><br><span style='color:#94a3b8;font-size:10px'>{html.escape(str(r['rev_q_lbl']))}</span>"
             body_html.append(
@@ -4253,14 +4359,16 @@ def render_fq_index_comparison(store):
                 "Nifty Index": r["tier"],
                 "Symbol": r["sym"],
                 "Company Name": r["company"],
-                "Qtr -3 Period": slots[0][0],
-                "Qtr -3 Net Profit (Cr)": round(slots[0][1], 2) if slots[0][1] is not None else None,
-                "Qtr -2 Period": slots[1][0],
-                "Qtr -2 Net Profit (Cr)": round(slots[1][1], 2) if slots[1][1] is not None else None,
-                "Qtr -1 Period": slots[2][0],
-                "Qtr -1 Net Profit (Cr)": round(slots[2][1], 2) if slots[2][1] is not None else None,
-                "Latest Qtr Period": slots[3][0],
-                "Latest Qtr Net Profit (Cr)": round(slots[3][1], 2) if slots[3][1] is not None else None,
+                "Prev Yr Qtr Period": slots[0][0],
+                "Prev Yr Qtr Net Profit (Cr)": round(slots[0][1], 2) if slots[0][1] is not None else None,
+                "Qtr -3 Period": slots[1][0],
+                "Qtr -3 Net Profit (Cr)": round(slots[1][1], 2) if slots[1][1] is not None else None,
+                "Qtr -2 Period": slots[2][0],
+                "Qtr -2 Net Profit (Cr)": round(slots[2][1], 2) if slots[2][1] is not None else None,
+                "Qtr -1 Period": slots[3][0],
+                "Qtr -1 Net Profit (Cr)": round(slots[3][1], 2) if slots[3][1] is not None else None,
+                "Latest Qtr Period": slots[4][0],
+                "Latest Qtr Net Profit (Cr)": round(slots[4][1], 2) if slots[4][1] is not None else None,
                 "Latest Qtr Total Revenue (Cr)": round(r["new_rev"], 2) if r["new_rev"] is not None else None,
             })
 
@@ -4269,16 +4377,16 @@ def render_fq_index_comparison(store):
             ".fq-idx-tbl th,.fq-idx-tbl td{padding:7px 9px;border:1px solid #2b4252;text-align:right}.fq-idx-tbl th{background:#173e50;text-align:center}</style>"
             "<div class='fq-idx-tbl'><table><thead><tr>"
             "<th>Sl. No.</th><th>Nifty Index</th><th>Company Name</th>"
-            "<th>Qtr -3 Net Profit (₹ Cr)</th><th>Qtr -2 Net Profit (₹ Cr)</th>"
+            "<th>Prev Yr Same Qtr (₹ Cr)</th><th>Qtr -3 Net Profit (₹ Cr)</th><th>Qtr -2 Net Profit (₹ Cr)</th>"
             "<th>Qtr -1 Net Profit (₹ Cr)</th><th>Latest Qtr Net Profit (₹ Cr)</th>"
             "<th>Total Revenue (₹ Cr)</th>"
             "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table></div>",
             unsafe_allow_html=True,
         )
         st.download_button(
-            "⬇️ Download 4-Quarter Net Profit & Revenue CSV",
+            "⬇️ Download 5-Quarter Net Profit & Revenue CSV",
             pd.DataFrame(export_list).to_csv(index=False),
-            f"{index_choice.lower().replace(' ', '_')}_4q_net_profit_revenue.csv",
+            f"{index_choice.lower().replace(' ', '_')}_5q_net_profit_revenue.csv",
             "text/csv",
             key="fq_idx_csv",
         )
@@ -4323,9 +4431,9 @@ def render_fq_index_comparison(store):
             ".fq-idx-tbl th,.fq-idx-tbl td{padding:7px 9px;border:1px solid #2b4252;text-align:right}.fq-idx-tbl th{background:#173e50;text-align:center}</style>"
             "<div class='fq-idx-tbl'><table><thead><tr>"
             "<th>Sl. No.</th><th>Nifty Index</th><th>Company Name</th>"
-            "<th>Prev Period</th><th>Prev Yr Revenue (₹ Cr)</th><th>Prev Yr Net Profit (₹ Cr)</th>"
-            "<th>New Period</th><th>New Revenue (₹ Cr)</th><th>New Net Profit (₹ Cr)</th>"
-            "<th>Rev YoY %</th><th>Net Profit YoY %</th><th>Profit / Loss</th>"
+            "<th>Base Period</th><th>Base Revenue (₹ Cr)</th><th>Base Net Profit (₹ Cr)</th>"
+            "<th>Compare Period</th><th>Compare Revenue (₹ Cr)</th><th>Compare Net Profit (₹ Cr)</th>"
+            "<th>Rev Change %</th><th>Net Profit Change %</th><th>Profit / Loss</th>"
             "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table></div>",
             unsafe_allow_html=True,
         )
@@ -4386,7 +4494,7 @@ def render_fast_quarterly_results():
         store = fq_store()
         fq_mode = st.radio(
             "Choose Mode",
-            ["1. Single Stock Quarterly Results", "2. Nifty 50 / 100 / 200 / 500 YoY Profit & Loss Table"],
+            ["1. Single Stock Quarterly Results", "2. Nifty 50 / 100 / 200 / 500 Profit & Loss Comparison"],
             horizontal=True,
             key="fq_mode_select",
         )
@@ -4538,7 +4646,7 @@ def render_fq_single_stock(store):
         st.markdown("#### 🩺 Automated Quarterly Health & Red-Flag Check")
         checks = []
         if rev_yoy is not None:
-            checks.append(("✅" if rev_yoy > 0 else "⚠️", f"YoY Revenue Growth: {rev_yoy:+.1f}% ({quarters[0]} vs {quarters[4]})"))
+            checks.append(("✅" if rev_yoy > 0 else "⚠️", f"YoY Revenue Growth: {rev_yoy:+.1f}% ({quarters[0]} vs {quarters[yoy_idx]})"))
         elif rev_qoq is not None:
             checks.append(("✅" if rev_qoq > 0 else "⚠️", f"QoQ Revenue Growth: {rev_qoq:+.1f}% ({quarters[0]} vs {quarters[1]})"))
         if opm_0 is not None and len(opm_row) > 1 and opm_row[1] is not None:
