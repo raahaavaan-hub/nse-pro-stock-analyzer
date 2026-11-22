@@ -3912,7 +3912,16 @@ def fq_fetch_quarterly(symbol):
         pass
     if inc.empty:
         raise ValueError("No quarterly income statement returned by Yahoo Finance for " + symbol + ".")
-    cols = sorted([c for c in inc.columns if pd.notna(c)], reverse=True)[:6]
+    raw_cols = sorted([c for c in inc.columns if pd.notna(c)], reverse=True)
+    s_rev_chk = fq_pick_row(inc, ["Total Revenue", "Operating Revenue", "Revenue"])
+    s_pat_chk = fq_pick_row(inc, ["Net Income", "Net Income Common Stockholders", "Net Income Continuous Operations"])
+    valid_cols = []
+    for c in raw_cols:
+        has_rev = s_rev_chk is not None and c in s_rev_chk.index and pd.notna(s_rev_chk[c])
+        has_pat = s_pat_chk is not None and c in s_pat_chk.index and pd.notna(s_pat_chk[c])
+        if has_rev or has_pat:
+            valid_cols.append(c)
+    cols = (valid_cols or raw_cols)[:6]
     inc = inc[cols]
     q_labels = []
     for c in cols:
@@ -4051,7 +4060,7 @@ def render_fq_index_comparison(store):
 
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
     index_choice = c1.selectbox("Nifty Universe", ["NIFTY 50", "NIFTY 100", "NIFTY 200", "NIFTY 500"], key="fq_idx_universe")
-    basis = c2.selectbox("Comparison Basis", ["Annual YoY (Prev FY vs New FY)", "Quarterly YoY (Same Qtr Last Yr)"], key="fq_idx_basis")
+    basis = c2.selectbox("Comparison Basis", ["Quarterly YoY (Same Qtr Last Yr)", "Annual YoY (Prev FY vs New FY)"], key="fq_idx_basis")
     tier_filter = c3.selectbox("Filter Index Tier", ["All Tiers", "Nifty 50", "Nifty 100", "Nifty 200", "Nifty 500"], key="fq_idx_tier")
     status_filter = c4.selectbox("Profit / Loss Filter", ["All", "Profit Only", "Loss Only", "Profit Increased (YoY)", "Profit Decreased (YoY)"], key="fq_idx_status")
 
@@ -4062,12 +4071,12 @@ def render_fq_index_comparison(store):
         target_symbols = [s for s, t in tiers.items() if t in allowed]
 
     b1, b2 = st.columns([2, 3])
-    missing_count = sum(1 for s in target_symbols if s not in store["values"] or (basis.startswith("Annual") and not store["values"][s].get("annual", {}).get("periods")))
-    fetch_missing = b1.button(f"↻ Fetch / Update {index_choice} ({missing_count} pending)" if missing_count else f"↻ Refresh All {index_choice}", type="primary", key="fq_idx_fetch")
+    missing_count = sum(1 for s in target_symbols if s not in store["values"] or (basis.startswith("Annual") and not store["values"][s].get("annual", {}).get("periods")) or (not basis.startswith("Annual") and not store["values"][s].get("quarters")))
+    fetch_missing = b1.button(f"↻ Fetch / Update {index_choice} ({missing_count} pending)" if missing_count else f"↻ Refresh All {index_choice} (Pull Latest Results)", type="primary", key="fq_idx_fetch")
     search_q = b2.text_input("Search company or symbol", placeholder="Type company name or symbol...", key="fq_idx_search").strip().lower()
 
     if fetch_missing:
-        to_fetch = [s for s in target_symbols if s not in store["values"] or (basis.startswith("Annual") and not store["values"][s].get("annual", {}).get("periods"))] if missing_count else target_symbols
+        to_fetch = [s for s in target_symbols if s not in store["values"] or (basis.startswith("Annual") and not store["values"][s].get("annual", {}).get("periods")) or (not basis.startswith("Annual") and not store["values"][s].get("quarters"))] if missing_count else target_symbols
         with loading_stopwatch(f"Fetching financial results for {len(to_fetch)} {index_choice} stocks…"):
             prog = st.progress(0.0)
             stat = st.empty()
@@ -4118,12 +4127,7 @@ def render_fq_index_comparison(store):
             m = cached.get("metrics", {})
             revs = m.get("Total Revenue (₹ Cr)", [])
             pats = m.get("Net Profit / PAT (₹ Cr)", [])
-            new_p = qs[0] if len(qs) > 0 else "—"
-            prev_p = qs[4] if len(qs) > 4 else "—"
-            new_rev = revs[0] if len(revs) > 0 else None
-            prev_rev = revs[4] if len(revs) > 4 else None
-            new_pat = pats[0] if len(pats) > 0 else None
-            prev_pat = pats[4] if len(pats) > 4 else None
+            new_p, prev_p, new_rev, prev_rev, new_pat, prev_pat = fq_pick_quarterly_yoy(qs, revs, pats)
 
         status_txt, status_col, status_cat = fq_compare_status(prev_pat, new_pat)
         if status_filter == "Profit Only" and status_cat not in ("profit", "profit_up", "profit_down"):
@@ -4230,6 +4234,40 @@ def render_fq_index_comparison(store):
     )
 
 
+def fq_yoy_match_index(quarters, new_i=0):
+    if new_i < 0 or new_i >= len(quarters):
+        return None
+    label = str(quarters[new_i]).strip()
+    try:
+        dt = datetime.strptime(label, "%b %Y")
+        target = dt.replace(year=dt.year - 1).strftime("%b %Y")
+        if target in quarters:
+            return quarters.index(target)
+    except Exception:
+        pass
+    return (new_i + 4) if (new_i + 4) < len(quarters) else None
+
+
+def fq_pick_quarterly_yoy(quarters, revs, pats):
+    if not quarters:
+        return "—", "—", None, None, None, None
+    new_i = 0
+    for i in range(len(quarters)):
+        r_v = revs[i] if i < len(revs) else None
+        p_v = pats[i] if i < len(pats) else None
+        if r_v is not None or p_v is not None:
+            new_i = i
+            break
+    prev_i = fq_yoy_match_index(quarters, new_i)
+    new_p = quarters[new_i] if new_i < len(quarters) else "—"
+    prev_p = quarters[prev_i] if prev_i is not None and prev_i < len(quarters) else "—"
+    new_rev = revs[new_i] if new_i < len(revs) else None
+    prev_rev = revs[prev_i] if prev_i is not None and prev_i < len(revs) else None
+    new_pat = pats[new_i] if new_i < len(pats) else None
+    prev_pat = pats[prev_i] if prev_i is not None and prev_i < len(pats) else None
+    return new_p, prev_p, new_rev, prev_rev, new_pat, prev_pat
+
+
 def fq_pct_change(curr, prev):
     if curr is None or prev is None or prev == 0 or not np.isfinite(curr) or not np.isfinite(prev):
         return None
@@ -4311,10 +4349,11 @@ def render_fq_single_stock(store):
         ocf = metrics.get("Operating Cash Flow (₹ Cr)", [])
         intr = metrics.get("Interest Expense (₹ Cr)", [])
 
+        yoy_idx = fq_yoy_match_index(quarters, 0)
         rev_qoq = fq_pct_change(rev[0], rev[1]) if len(rev) > 1 else None
-        rev_yoy = fq_pct_change(rev[0], rev[4]) if len(rev) > 4 else None
+        rev_yoy = fq_pct_change(rev[0], rev[yoy_idx]) if yoy_idx is not None and yoy_idx < len(rev) else None
         pat_qoq = fq_pct_change(pat[0], pat[1]) if len(pat) > 1 else None
-        pat_yoy = fq_pct_change(pat[0], pat[4]) if len(pat) > 4 else None
+        pat_yoy = fq_pct_change(pat[0], pat[yoy_idx]) if yoy_idx is not None and yoy_idx < len(pat) else None
         opm_0 = (op[0] / rev[0] * 100.0) if (len(op) > 0 and len(rev) > 0 and op[0] is not None and rev[0]) else None
         npm_0 = (pat[0] / rev[0] * 100.0) if (len(pat) > 0 and len(rev) > 0 and pat[0] is not None and rev[0]) else None
 
@@ -4350,7 +4389,7 @@ def render_fq_single_stock(store):
             if not vals or all(v is None for v in vals):
                 continue
             qoq = fq_pct_change(vals[0], vals[1]) if len(vals) > 1 and not is_pct else ((vals[0] - vals[1]) if is_pct and len(vals) > 1 and vals[0] is not None and vals[1] is not None else None)
-            yoy = fq_pct_change(vals[0], vals[4]) if len(vals) > 4 and not is_pct else ((vals[0] - vals[4]) if is_pct and len(vals) > 4 and vals[0] is not None and vals[4] is not None else None)
+            yoy = fq_pct_change(vals[0], vals[yoy_idx]) if yoy_idx is not None and yoy_idx < len(vals) and not is_pct else ((vals[0] - vals[yoy_idx]) if is_pct and yoy_idx is not None and yoy_idx < len(vals) and vals[0] is not None and vals[yoy_idx] is not None else None)
             cells = [f"<td style='text-align:left;font-weight:700'>{html.escape(label)}</td>"]
             exp_row = {"Metric": label}
             for q_name, v in zip(quarters, vals):
