@@ -4049,18 +4049,34 @@ def fq_compare_status(prev_pat, new_pat):
     return f"🟡 Profit ({pct_diff:.1f}%)", "#fbbf24", "profit_down"
 
 
+def fq_indian_q_label(label):
+    txt = str(label or "").strip()
+    if not txt or txt == "—":
+        return "—"
+    try:
+        dt = datetime.strptime(txt, "%b %Y")
+        q_num = {4: "Q1", 5: "Q1", 6: "Q1", 7: "Q2", 8: "Q2", 9: "Q2", 10: "Q3", 11: "Q3", 12: "Q3", 1: "Q4", 2: "Q4", 3: "Q4"}[dt.month]
+        return f"{q_num} · {txt}"
+    except Exception:
+        return txt
+
+
 def render_fq_index_comparison(store):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    st.caption("Compare Previous Year vs Latest Revenue & Net Profit across Nifty 50 / 100 / 200 / 500 companies.")
+    st.caption("View 4-quarter Net Profit & Total Revenue or compare YoY results across Nifty 50 / 100 / 200 / 500 companies.")
     tiers, nifty_companies = fq_nifty_tier_map()
     if not tiers:
         st.warning("Could not load Nifty index constituent lists right now. Please try again.")
         return
 
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+    c1, c2, c3, c4 = st.columns([1.8, 2.4, 1.8, 2.0])
     index_choice = c1.selectbox("Nifty Universe", ["NIFTY 50", "NIFTY 100", "NIFTY 200", "NIFTY 500"], key="fq_idx_universe")
-    basis = c2.selectbox("Comparison Basis", ["Quarterly YoY (Same Qtr Last Yr)", "Annual YoY (Prev FY vs New FY)"], key="fq_idx_basis")
+    basis = c2.selectbox(
+        "View / Comparison Basis",
+        ["4-Quarter Net Profit & Revenue", "Quarterly YoY (Same Qtr Last Yr)", "Annual YoY (Prev FY vs New FY)"],
+        key="fq_idx_basis",
+    )
     tier_filter = c3.selectbox("Filter Index Tier", ["All Tiers", "Nifty 50", "Nifty 100", "Nifty 200", "Nifty 500"], key="fq_idx_tier")
     status_filter = c4.selectbox("Profit / Loss Filter", ["All", "Profit Only", "Loss Only", "Profit Increased (YoY)", "Profit Decreased (YoY)"], key="fq_idx_status")
 
@@ -4070,9 +4086,14 @@ def render_fq_index_comparison(store):
         allowed = {"NIFTY 50": {"Nifty 50"}, "NIFTY 100": {"Nifty 50", "Nifty 100"}, "NIFTY 200": {"Nifty 50", "Nifty 100", "Nifty 200"}, "NIFTY 500": {"Nifty 50", "Nifty 100", "Nifty 200", "Nifty 500"}}[index_choice]
         target_symbols = [s for s, t in tiers.items() if t in allowed]
 
-    b1, b2 = st.columns([2, 3])
+    s1, s2, b1, b2 = st.columns([1.8, 1.5, 2.3, 2.4])
+    sort_by = s1.selectbox("Sort By", ["Latest Net Profit", "Total Revenue", "Company Name"], key="fq_idx_sort_by")
+    sort_order_opts = ["A → Z", "Z → A"] if sort_by == "Company Name" else ["High → Low", "Low → High"]
+    sort_order = s2.selectbox("Sort Order", sort_order_opts, key="fq_idx_sort_order")
+
     missing_count = sum(1 for s in target_symbols if s not in store["values"] or (basis.startswith("Annual") and not store["values"][s].get("annual", {}).get("periods")) or (not basis.startswith("Annual") and not store["values"][s].get("quarters")))
-    fetch_missing = b1.button(f"↻ Fetch / Update {index_choice} ({missing_count} pending)" if missing_count else f"↻ Refresh All {index_choice} (Pull Latest Results)", type="primary", key="fq_idx_fetch")
+    b1.write("")
+    fetch_missing = b1.button(f"↻ Fetch / Update {index_choice} ({missing_count} pending)" if missing_count else f"↻ Refresh All {index_choice} (Pull Latest Results)", type="primary", key="fq_idx_fetch", use_container_width=True)
     search_q = b2.text_input("Search company or symbol", placeholder="Type company name or symbol...", key="fq_idx_search").strip().lower()
 
     if fetch_missing:
@@ -4099,6 +4120,7 @@ def render_fq_index_comparison(store):
             if failed:
                 st.warning(f"{failed} stocks could not be fetched from Yahoo Finance; available results are shown below.")
 
+    is_four_q = basis.startswith("4-Quarter")
     rows = []
     for sym in target_symbols:
         tier_label = tiers.get(sym, index_choice.title())
@@ -4122,12 +4144,20 @@ def render_fq_index_comparison(store):
             prev_rev = revs[1] if len(revs) > 1 else None
             new_pat = pats[0] if len(pats) > 0 else None
             prev_pat = pats[1] if len(pats) > 1 else None
+            q4_slots = []
+            rev_q_lbl = new_p
         else:
             qs = cached.get("quarters", [])
             m = cached.get("metrics", {})
             revs = m.get("Total Revenue (₹ Cr)", [])
             pats = m.get("Net Profit / PAT (₹ Cr)", [])
             new_p, prev_p, new_rev, prev_rev, new_pat, prev_pat = fq_pick_quarterly_yoy(qs, revs, pats)
+            q4_slots = []
+            for offset in (3, 2, 1, 0):
+                q_lbl = fq_indian_q_label(qs[offset]) if offset < len(qs) else "—"
+                q_pat = pats[offset] if offset < len(pats) else None
+                q4_slots.append((q_lbl, q_pat))
+            rev_q_lbl = fq_indian_q_label(new_p)
 
         status_txt, status_col, status_cat = fq_compare_status(prev_pat, new_pat)
         if status_filter == "Profit Only" and status_cat not in ("profit", "profit_up", "profit_down"):
@@ -4141,6 +4171,8 @@ def render_fq_index_comparison(store):
 
         rev_pct = fq_pct_change(new_rev, prev_rev)
         pat_pct = fq_pct_change(new_pat, prev_pat)
+        sort_pat_val = new_pat if (new_pat is not None and np.isfinite(new_pat)) else None
+        sort_rev_val = new_rev if (new_rev is not None and np.isfinite(new_rev)) else None
         rows.append({
             "sym": sym,
             "tier": tier_label,
@@ -4153,6 +4185,10 @@ def render_fq_index_comparison(store):
             "new_pat": new_pat,
             "rev_pct": rev_pct,
             "pat_pct": pat_pct,
+            "q4_slots": q4_slots,
+            "rev_q_lbl": rev_q_lbl,
+            "sort_pat": sort_pat_val,
+            "sort_rev": sort_rev_val,
             "status_txt": status_txt,
             "status_col": status_col,
             "status_cat": status_cat,
@@ -4161,6 +4197,15 @@ def render_fq_index_comparison(store):
     if not rows:
         st.info(f"No cached comparison data for {index_choice} yet. Click **Fetch / Update {index_choice}** above to load financial results.")
         return
+
+    if sort_by == "Company Name":
+        rows.sort(key=lambda r: r["company"].lower(), reverse=(sort_order == "Z → A"))
+    elif sort_by == "Total Revenue":
+        desc = (sort_order == "High → Low")
+        rows.sort(key=lambda r: (r["sort_rev"] is None, -(r["sort_rev"] or 0.0) if desc else (r["sort_rev"] or 0.0), r["company"].lower()))
+    else:
+        desc = (sort_order == "High → Low")
+        rows.sort(key=lambda r: (r["sort_pat"] is None, -(r["sort_pat"] or 0.0) if desc else (r["sort_pat"] or 0.0), r["company"].lower()))
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Companies Shown", f"{len(rows):,}")
@@ -4171,6 +4216,14 @@ def render_fq_index_comparison(store):
     def fmt_cr(v):
         return f"₹{v:,.2f}" if v is not None and np.isfinite(v) else "—"
 
+    def fmt_pat_cell(v, q_lbl):
+        if v is None or not np.isfinite(v):
+            val_html = "<span style='color:#94a3b8'>—</span>"
+        else:
+            col = "#36d98b" if v > 0 else "#ff8383" if v < 0 else "#edf4f8"
+            val_html = f"<span style='color:{col};font-weight:700'>₹{v:,.2f}</span>"
+        return f"{val_html}<br><span style='color:#94a3b8;font-size:10px'>{html.escape(str(q_lbl))}</span>"
+
     def fmt_pct(v):
         if v is None or not np.isfinite(v):
             return "—"
@@ -4179,59 +4232,110 @@ def render_fq_index_comparison(store):
 
     body_html = []
     export_list = []
-    for idx, r in enumerate(rows, start=1):
-        tier_bg = {"Nifty 50": "#1d4ed8", "Nifty 100": "#0f766e", "Nifty 200": "#7c3aed", "Nifty 500": "#475569"}.get(r["tier"], "#334155")
-        tier_badge = f"<span style='background:{tier_bg};color:#fff;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap'>{html.escape(r['tier'])}</span>"
-        body_html.append(
-            "<tr>"
-            f"<td style='text-align:center'>{idx}</td>"
-            f"<td style='text-align:center'>{tier_badge}</td>"
-            f"<td style='text-align:left;font-weight:700'>{html.escape(r['company'])} <span style='color:#94a3b8;font-weight:400'>({html.escape(r['sym'])})</span></td>"
-            f"<td style='text-align:center;color:#94a3b8'>{html.escape(str(r['prev_p']))}</td>"
-            f"<td>{fmt_cr(r['prev_rev'])}</td>"
-            f"<td>{fmt_cr(r['prev_pat'])}</td>"
-            f"<td style='text-align:center;color:#94a3b8'>{html.escape(str(r['new_p']))}</td>"
-            f"<td>{fmt_cr(r['new_rev'])}</td>"
-            f"<td>{fmt_cr(r['new_pat'])}</td>"
-            f"<td>{fmt_pct(r['rev_pct'])}</td>"
-            f"<td>{fmt_pct(r['pat_pct'])}</td>"
-            f"<td style='text-align:center;color:{r['status_col']};font-weight:700;white-space:nowrap'>{html.escape(r['status_txt'])}</td>"
-            "</tr>"
-        )
-        export_list.append({
-            "Sl. No.": idx,
-            "Nifty Index": r["tier"],
-            "Symbol": r["sym"],
-            "Company Name": r["company"],
-            "Prev Period": r["prev_p"],
-            "Prev Yr Revenue (Cr)": round(r["prev_rev"], 2) if r["prev_rev"] is not None else None,
-            "Prev Yr Net Profit (Cr)": round(r["prev_pat"], 2) if r["prev_pat"] is not None else None,
-            "New Period": r["new_p"],
-            "New Revenue (Cr)": round(r["new_rev"], 2) if r["new_rev"] is not None else None,
-            "New Net Profit (Cr)": round(r["new_pat"], 2) if r["new_pat"] is not None else None,
-            "Revenue YoY %": round(r["rev_pct"], 2) if r["rev_pct"] is not None else None,
-            "Net Profit YoY %": round(r["pat_pct"], 2) if r["pat_pct"] is not None else None,
-            "Result (Profit / Loss)": r["status_txt"],
-        })
+    if is_four_q:
+        for idx, r in enumerate(rows, start=1):
+            tier_bg = {"Nifty 50": "#1d4ed8", "Nifty 100": "#0f766e", "Nifty 200": "#7c3aed", "Nifty 500": "#475569"}.get(r["tier"], "#334155")
+            tier_badge = f"<span style='background:{tier_bg};color:#fff;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap'>{html.escape(r['tier'])}</span>"
+            slots = r["q4_slots"]
+            q_cells = "".join(f"<td>{fmt_pat_cell(q_pat, q_lbl)}</td>" for q_lbl, q_pat in slots)
+            rev_cell = f"<span style='font-weight:700'>{fmt_cr(r['new_rev'])}</span><br><span style='color:#94a3b8;font-size:10px'>{html.escape(str(r['rev_q_lbl']))}</span>"
+            body_html.append(
+                "<tr>"
+                f"<td style='text-align:center'>{idx}</td>"
+                f"<td style='text-align:center'>{tier_badge}</td>"
+                f"<td style='text-align:left;font-weight:700'>{html.escape(r['company'])} <span style='color:#94a3b8;font-weight:400'>({html.escape(r['sym'])})</span></td>"
+                f"{q_cells}"
+                f"<td>{rev_cell}</td>"
+                "</tr>"
+            )
+            export_list.append({
+                "Sl. No.": idx,
+                "Nifty Index": r["tier"],
+                "Symbol": r["sym"],
+                "Company Name": r["company"],
+                "Qtr -3 Period": slots[0][0],
+                "Qtr -3 Net Profit (Cr)": round(slots[0][1], 2) if slots[0][1] is not None else None,
+                "Qtr -2 Period": slots[1][0],
+                "Qtr -2 Net Profit (Cr)": round(slots[1][1], 2) if slots[1][1] is not None else None,
+                "Qtr -1 Period": slots[2][0],
+                "Qtr -1 Net Profit (Cr)": round(slots[2][1], 2) if slots[2][1] is not None else None,
+                "Latest Qtr Period": slots[3][0],
+                "Latest Qtr Net Profit (Cr)": round(slots[3][1], 2) if slots[3][1] is not None else None,
+                "Latest Qtr Total Revenue (Cr)": round(r["new_rev"], 2) if r["new_rev"] is not None else None,
+            })
 
-    st.markdown(
-        "<style>.fq-idx-tbl{overflow-x:auto;margin:10px 0}.fq-idx-tbl table{width:100%;border-collapse:collapse;font-size:12px;background:#14212d;color:#edf4f8}"
-        ".fq-idx-tbl th,.fq-idx-tbl td{padding:7px 9px;border:1px solid #2b4252;text-align:right}.fq-idx-tbl th{background:#173e50;text-align:center}</style>"
-        "<div class='fq-idx-tbl'><table><thead><tr>"
-        "<th>Sl. No.</th><th>Nifty Index</th><th>Company Name</th>"
-        "<th>Prev Period</th><th>Prev Yr Revenue (₹ Cr)</th><th>Prev Yr Net Profit (₹ Cr)</th>"
-        "<th>New Period</th><th>New Revenue (₹ Cr)</th><th>New Net Profit (₹ Cr)</th>"
-        "<th>Rev YoY %</th><th>Net Profit YoY %</th><th>Profit / Loss</th>"
-        "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table></div>",
-        unsafe_allow_html=True,
-    )
-    st.download_button(
-        "⬇️ Download Nifty Comparison CSV",
-        pd.DataFrame(export_list).to_csv(index=False),
-        f"{index_choice.lower().replace(' ', '_')}_yoy_profit_loss.csv",
-        "text/csv",
-        key="fq_idx_csv",
-    )
+        st.markdown(
+            "<style>.fq-idx-tbl{overflow-x:auto;margin:10px 0}.fq-idx-tbl table{width:100%;border-collapse:collapse;font-size:12px;background:#14212d;color:#edf4f8}"
+            ".fq-idx-tbl th,.fq-idx-tbl td{padding:7px 9px;border:1px solid #2b4252;text-align:right}.fq-idx-tbl th{background:#173e50;text-align:center}</style>"
+            "<div class='fq-idx-tbl'><table><thead><tr>"
+            "<th>Sl. No.</th><th>Nifty Index</th><th>Company Name</th>"
+            "<th>Qtr -3 Net Profit (₹ Cr)</th><th>Qtr -2 Net Profit (₹ Cr)</th>"
+            "<th>Qtr -1 Net Profit (₹ Cr)</th><th>Latest Qtr Net Profit (₹ Cr)</th>"
+            "<th>Total Revenue (₹ Cr)</th>"
+            "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "⬇️ Download 4-Quarter Net Profit & Revenue CSV",
+            pd.DataFrame(export_list).to_csv(index=False),
+            f"{index_choice.lower().replace(' ', '_')}_4q_net_profit_revenue.csv",
+            "text/csv",
+            key="fq_idx_csv",
+        )
+    else:
+        for idx, r in enumerate(rows, start=1):
+            tier_bg = {"Nifty 50": "#1d4ed8", "Nifty 100": "#0f766e", "Nifty 200": "#7c3aed", "Nifty 500": "#475569"}.get(r["tier"], "#334155")
+            tier_badge = f"<span style='background:{tier_bg};color:#fff;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap'>{html.escape(r['tier'])}</span>"
+            body_html.append(
+                "<tr>"
+                f"<td style='text-align:center'>{idx}</td>"
+                f"<td style='text-align:center'>{tier_badge}</td>"
+                f"<td style='text-align:left;font-weight:700'>{html.escape(r['company'])} <span style='color:#94a3b8;font-weight:400'>({html.escape(r['sym'])})</span></td>"
+                f"<td style='text-align:center;color:#94a3b8'>{html.escape(str(r['prev_p']))}</td>"
+                f"<td>{fmt_cr(r['prev_rev'])}</td>"
+                f"<td>{fmt_cr(r['prev_pat'])}</td>"
+                f"<td style='text-align:center;color:#94a3b8'>{html.escape(str(r['new_p']))}</td>"
+                f"<td>{fmt_cr(r['new_rev'])}</td>"
+                f"<td>{fmt_cr(r['new_pat'])}</td>"
+                f"<td>{fmt_pct(r['rev_pct'])}</td>"
+                f"<td>{fmt_pct(r['pat_pct'])}</td>"
+                f"<td style='text-align:center;color:{r['status_col']};font-weight:700;white-space:nowrap'>{html.escape(r['status_txt'])}</td>"
+                "</tr>"
+            )
+            export_list.append({
+                "Sl. No.": idx,
+                "Nifty Index": r["tier"],
+                "Symbol": r["sym"],
+                "Company Name": r["company"],
+                "Prev Period": r["prev_p"],
+                "Prev Yr Revenue (Cr)": round(r["prev_rev"], 2) if r["prev_rev"] is not None else None,
+                "Prev Yr Net Profit (Cr)": round(r["prev_pat"], 2) if r["prev_pat"] is not None else None,
+                "New Period": r["new_p"],
+                "New Revenue (Cr)": round(r["new_rev"], 2) if r["new_rev"] is not None else None,
+                "New Net Profit (Cr)": round(r["new_pat"], 2) if r["new_pat"] is not None else None,
+                "Revenue YoY %": round(r["rev_pct"], 2) if r["rev_pct"] is not None else None,
+                "Net Profit YoY %": round(r["pat_pct"], 2) if r["pat_pct"] is not None else None,
+                "Result (Profit / Loss)": r["status_txt"],
+            })
+
+        st.markdown(
+            "<style>.fq-idx-tbl{overflow-x:auto;margin:10px 0}.fq-idx-tbl table{width:100%;border-collapse:collapse;font-size:12px;background:#14212d;color:#edf4f8}"
+            ".fq-idx-tbl th,.fq-idx-tbl td{padding:7px 9px;border:1px solid #2b4252;text-align:right}.fq-idx-tbl th{background:#173e50;text-align:center}</style>"
+            "<div class='fq-idx-tbl'><table><thead><tr>"
+            "<th>Sl. No.</th><th>Nifty Index</th><th>Company Name</th>"
+            "<th>Prev Period</th><th>Prev Yr Revenue (₹ Cr)</th><th>Prev Yr Net Profit (₹ Cr)</th>"
+            "<th>New Period</th><th>New Revenue (₹ Cr)</th><th>New Net Profit (₹ Cr)</th>"
+            "<th>Rev YoY %</th><th>Net Profit YoY %</th><th>Profit / Loss</th>"
+            "</tr></thead><tbody>" + "".join(body_html) + "</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+        st.download_button(
+            "⬇️ Download Nifty Comparison CSV",
+            pd.DataFrame(export_list).to_csv(index=False),
+            f"{index_choice.lower().replace(' ', '_')}_yoy_profit_loss.csv",
+            "text/csv",
+            key="fq_idx_csv",
+        )
 
 
 def fq_yoy_match_index(quarters, new_i=0):
