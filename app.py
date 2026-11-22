@@ -1,3 +1,4 @@
+
 import io, re, html, requests, numpy as np, pandas as pd, streamlit as st, yfinance as yf
 import json
 import time
@@ -3346,7 +3347,10 @@ def render_usf_percentage(state):
     result=usf_filter_cap_group(result,cap_group)
     result=result.sort_values('Market Cap ($m)' if sort=='Market Cap' else 'Change %',ascending=order=='Low → High',na_position='last',kind='mergesort').reset_index(drop=True)
     st.caption(f'{frame["Change %"].notna().sum():,}/{len(symbols):,} stocks have enough saved history · {len(result):,} matches. Shares use Indian comma grouping; prices/cap are US dollars. Market-cap filters exclude missing caps.')
-    if result.empty:st.info('No saved stocks match.');return
+    if result.empty:
+        other = 'Gainer' if direction == 'Loser' else 'Loser'
+        st.info(f'No saved stocks match your current filter (Show: {direction}, Minimum move ≥ {threshold}%). Switch Show to "{other}", set Minimum move % to 0.0, or click "Update US prices" to save more stocks.')
+        return
     page=st.number_input('Result page · 50 stocks per page',min_value=1,max_value=max(1,(len(result)+49)//50),value=1,key='usf_page_'+group+'_'+period+'_'+str(len(result))) if len(result)>50 else 1
     usf_table(state,result.iloc[(int(page)-1)*50:int(page)*50],period)
     export=result.copy();export['Price Date']=pd.to_datetime(export['Price Date']).dt.strftime('%d/%m/%Y');st.download_button('Download US Fast results',export.to_csv(index=False),'us_fast.csv','text/csv',key='usf_csv')
