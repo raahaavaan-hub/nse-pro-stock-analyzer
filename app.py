@@ -3895,41 +3895,91 @@ def spk_top_symbols(day_list,start_iso,end_iso,n=60):
     return [x for _,x in gains[:n]]
 
 
-def spk_fund(sym):
-    """Market cap, debt and last two quarters from Yahoo Finance; saved 12 hours."""
-    old=spk_read('fund:'+sym)
-    if old and time.time()-old.get('t',0)<43200:return old
-    out={'t':time.time(),'results':[]}
+def spk_nse_results(sym):
+    """Fallback: NSE quarterly results (gives the real announcement date). Values are in rupee lakhs."""
     try:
-        t=yf.Ticker(sym+'.NS')
-        try:info=t.info or {}
-        except Exception:info={}
-        for key,field in (('cap','marketCap'),('debt','totalDebt'),('de','debtToEquity'),('cash','totalCash')):
-            v=info.get(field)
-            if isinstance(v,(int,float)) and np.isfinite(v):out[key]=float(v)
+        sess=_nse_session();sess.headers.update({'Accept':'application/json','Referer':'https://www.nseindia.com/'})
+        r=sess.get('https://www.nseindia.com/api/corporates-financial-results',params={'index':'equities','symbol':sym,'period':'Quarterly'},timeout=15)
+        rows=r.json()
+        if not isinstance(rows,list):return []
+        out=[]
+        for row in rows:
+            profit=None
+            for key in ('proLossAftTax','reProLossAftTax','netProfitLoss','re_net_profit'):
+                try:
+                    v=float(str(row.get(key)).replace(',',''))
+                    profit=v*100000;break
+                except (TypeError,ValueError):continue
+            if profit is None:continue
+            filed=pd.to_datetime(row.get('filingDate') or row.get('broadCastDate') or row.get('toDate'),errors='coerce',dayfirst=True)
+            end_=pd.to_datetime(row.get('toDate'),errors='coerce',dayfirst=True)
+            if pd.isna(filed):continue
+            out.append({'announcedOn':filed.date().isoformat(),'periodEnd':(end_.date().isoformat() if pd.notna(end_) else ''),'profit':profit,
+                        'change':{'label':'Comparison not available','tone':'neutral'},
+                        'source':row.get('xbrl') or 'https://www.nseindia.com/companies-listing/corporate-filings-financial-results',
+                        'via':'NSE filing','status':'nse'})
+            if len(out)>=2:break
+        return out
+    except Exception:
+        return []
+
+
+def spk_fund(sym):
+    """Market cap, debt and last two quarters. Yahoo first (with retries), NSE results as fallback; saved 12 hours."""
+    old=spk_read('fund:'+sym)
+    if old and time.time()-old.get('t',0)<43200 and (old.get('cap') or old.get('results')):return old
+    out={'t':time.time(),'results':[]}
+    t=yf.Ticker(sym+'.NS')
+    for attempt in range(3):
         try:
-            q=t.quarterly_income_stmt
-            if q is not None and not q.empty:
-                def pick(col):
-                    for nm in ('Net Income','Net Income Common Stockholders'):
-                        if nm in q.index:
-                            v=q.loc[nm,col]
-                            if pd.notna(v):return float(v)
-                    return None
-                cols=list(q.columns)
-                for i,col in enumerate(cols[:2]):
-                    profit=pick(col)
-                    if profit is None:continue
-                    prior=pick(cols[i+4]) if i+4<len(cols) else None
-                    change={'label':'Comparison not available','tone':'neutral'}
-                    if prior not in (None,0):
-                        pc=(profit-prior)/abs(prior)*100
-                        change={'label':f'{pc:+.1f}% YoY','tone':'green' if pc>=0 else 'red'}
-                    end=pd.Timestamp(col).date().isoformat()
-                    out['results'].append({'announcedOn':end,'periodEnd':end,'profit':profit,'priorProfit':prior,'change':change,
-                                           'source':'https://finance.yahoo.com/quote/'+sym+'.NS/financials','via':'Quarter ended','status':'yahoo'})
+            info=t.info or {}
+            for key,field in (('cap','marketCap'),('debt','totalDebt'),('de','debtToEquity'),('cash','totalCash')):
+                v=info.get(field)
+                if isinstance(v,(int,float)) and np.isfinite(v):out[key]=float(v)
+            if out.get('cap'):break
         except Exception:pass
-    except Exception:pass
+        time.sleep(0.8*(attempt+1))
+    if not out.get('cap'):
+        try:
+            fi=t.fast_info
+            for k in ('marketCap','market_cap'):
+                try:
+                    v=float(fi[k])
+                    if np.isfinite(v) and v>0:out['cap']=v;break
+                except Exception:continue
+        except Exception:pass
+    names=('Net Income','Net Income Common Stockholders','Net Income Including Noncontrolling Interests',
+           'Net Income From Continuing Operation Net Minority Interest','Net Income Continuous Operations')
+    for attempt in range(2):
+        try:
+            q=None
+            for attr in ('quarterly_income_stmt','quarterly_financials'):
+                frame=getattr(t,attr,None)
+                if frame is not None and not frame.empty:q=frame;break
+            if q is None:raise ValueError('no quarterly table')
+            def pick(col):
+                for nm in names:
+                    if nm in q.index:
+                        v=q.loc[nm,col]
+                        if pd.notna(v):return float(v)
+                return None
+            cols=list(q.columns)
+            for i,col in enumerate(cols[:2]):
+                profit=pick(col)
+                if profit is None:continue
+                prior=pick(cols[i+4]) if i+4<len(cols) else None
+                change={'label':'Comparison not available','tone':'neutral'}
+                if prior not in (None,0):
+                    pc=(profit-prior)/abs(prior)*100
+                    change={'label':f'{pc:+.1f}% YoY','tone':'green' if pc>=0 else 'red'}
+                end=pd.Timestamp(col).date().isoformat()
+                out['results'].append({'announcedOn':end,'periodEnd':end,'profit':profit,'priorProfit':prior,'change':change,
+                                       'source':'https://finance.yahoo.com/quote/'+sym+'.NS/financials','via':'Quarter ended','status':'yahoo'})
+            if out['results']:break
+        except Exception:
+            time.sleep(0.8)
+    if not out['results']:
+        out['results']=spk_nse_results(sym)
     if out.get('cap') or out['results'] or out.get('debt'):spk_write('fund:'+sym,out)
     return out
 
@@ -4050,7 +4100,7 @@ def render_stock_peaks():
         from concurrent.futures import ThreadPoolExecutor
         top=spk_top_symbols(data['prices']['days'],start.isoformat(),end.isoformat(),60)
         with loading_stopwatch('Loading market cap, debt and quarterly results for top gainers…'):
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 fundamentals=dict(zip(top,pool.map(spk_fund,top)))
         data['fund']={k:{x:v[x] for x in ('cap','debt','de','cash') if x in v} for k,v in fundamentals.items()}
         for sym,v in fundamentals.items():
@@ -4068,7 +4118,7 @@ def render_stock_peaks():
     source=source.replace('Full-universe data is included for September; other dates cover available news stocks only.','Only available reports are used. Check coverage above before comparing a full market.')
     helper=("const FUND=DATA.fund||{};const crore=v=>Number.isFinite(v)?money(v/10000000)+' crore':null;"
             "function capHTML(r){const f=FUND[r.symbol]||{};return f.cap?'<strong>'+crore(f.cap)+'</strong><small>Yahoo Finance</small>':'<small>Not reported by data provider</small>';}"
-            "function debtHTML(r){const f=FUND[r.symbol]||{};if(f.debt==null&&f.de==null)return '<small>Not reported by data provider</small>';"
+            "function debtHTML(r){const f=FUND[r.symbol]||{};if(f.debt==null&&f.de==null)return f.cap?'<small>Not reported (banks and finance companies usually have no debt figure)</small>':'<small>Not reported by data provider</small>';"
             "return (f.debt!=null?'<strong>'+crore(f.debt)+'</strong>':'')+(f.de!=null?'<small>Debt/Equity '+f.de.toFixed(1)+'%</small>':'');}"
             "function ordersFallback(r){const n=(periodNews[r.symbol]||[]).filter(x=>/order|contract|bags|wins|secures|deal/i.test(x.reason||''));"
             "return n.length?n.map(x=>link(x.url,dmy(x.date)+' · order headline')).join('<br>'):'<small>No order headlines in loaded news</small>';}")
