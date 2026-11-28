@@ -3837,15 +3837,101 @@ def spk_normalize_bhav(frame,day):
     return {'date':day,'status':'ok','bars':bars,'names':names,'fetched':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),'source':'NSE daily report'}
 
 
+class SpkHoliday(Exception):pass
+
+
 def spk_fetch_day(day):
     import zipfile
     stamp=date.fromisoformat(day).strftime('%Y%m%d')
-    url='https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_'+stamp+'_F_0000.csv.zip'
-    response=requests.get(url,headers=HEADERS,timeout=(4,12));response.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-        filename=next(n for n in archive.namelist() if n.lower().endswith('.csv'))
-        frame=pd.read_csv(archive.open(filename));frame.columns=frame.columns.str.strip()
-    return spk_normalize_bhav(frame,day)
+    name='/content/cm/BhavCopy_NSE_CM_0_0_0_'+stamp+'_F_0000.csv.zip'
+    sess=_nse_session();last=None
+    for host in ('https://nsearchives.nseindia.com','https://archives.nseindia.com'):
+        for attempt in range(2):
+            try:
+                response=sess.get(host+name,timeout=(5,25))
+                if response.status_code==404:
+                    last=SpkHoliday(day+': no report (market holiday or not published yet)');break
+                response.raise_for_status()
+                with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                    filename=next(n for n in archive.namelist() if n.lower().endswith('.csv'))
+                    frame=pd.read_csv(archive.open(filename));frame.columns=frame.columns.str.strip()
+                return spk_normalize_bhav(frame,day)
+            except (requests.RequestException,zipfile.BadZipFile,StopIteration,ValueError) as exc:
+                last=exc;time.sleep(0.6)
+    raise last or ValueError(day+': report unavailable')
+
+
+def spk_fetch_missing(day_list,workers=5):
+    """Fetch EVERY missing daily report in parallel. Holidays are remembered so they are never retried."""
+    from concurrent.futures import ThreadPoolExecutor
+    today=datetime.now(ZoneInfo('Asia/Kolkata')).date();now=datetime.now(ZoneInfo('Asia/Kolkata'))
+    todo=[d for d in day_list if spk_read('day:'+d) is None]
+    # today's report is normally published in the evening; do not hammer NSE before that
+    todo=[d for d in todo if not (d==today.isoformat() and now.hour<18)]
+    def one(d):
+        try:
+            spk_write('day:'+d,spk_fetch_day(d));return None
+        except SpkHoliday as exc:
+            if date.fromisoformat(d)<today-timedelta(days=1):
+                spk_write('day:'+d,{'date':d,'status':'holiday','bars':[],'names':{}})
+            return None
+        except Exception as exc:
+            return d+': '+str(exc)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return [e for e in pool.map(one,todo) if e]
+
+
+def spk_top_symbols(day_list,start_iso,end_iso,n=60):
+    first={};peak={}
+    for item in day_list:
+        if item.get('status')!='ok' or not (start_iso<=item['date']<=end_iso):continue
+        for b in item.get('bars',[]):
+            try:
+                sym=b[0]
+                if sym not in first and b[5]>0:first[sym]=b[5]
+                peak[sym]=max(peak.get(sym,0),b[3])
+            except (IndexError,TypeError):continue
+    gains=sorted(((peak[x]/first[x],x) for x in first if x in peak),reverse=True)
+    return [x for _,x in gains[:n]]
+
+
+def spk_fund(sym):
+    """Market cap, debt and last two quarters from Yahoo Finance; saved 12 hours."""
+    old=spk_read('fund:'+sym)
+    if old and time.time()-old.get('t',0)<43200:return old
+    out={'t':time.time(),'results':[]}
+    try:
+        t=yf.Ticker(sym+'.NS')
+        try:info=t.info or {}
+        except Exception:info={}
+        for key,field in (('cap','marketCap'),('debt','totalDebt'),('de','debtToEquity'),('cash','totalCash')):
+            v=info.get(field)
+            if isinstance(v,(int,float)) and np.isfinite(v):out[key]=float(v)
+        try:
+            q=t.quarterly_income_stmt
+            if q is not None and not q.empty:
+                def pick(col):
+                    for nm in ('Net Income','Net Income Common Stockholders'):
+                        if nm in q.index:
+                            v=q.loc[nm,col]
+                            if pd.notna(v):return float(v)
+                    return None
+                cols=list(q.columns)
+                for i,col in enumerate(cols[:2]):
+                    profit=pick(col)
+                    if profit is None:continue
+                    prior=pick(cols[i+4]) if i+4<len(cols) else None
+                    change={'label':'Comparison not available','tone':'neutral'}
+                    if prior not in (None,0):
+                        pc=(profit-prior)/abs(prior)*100
+                        change={'label':f'{pc:+.1f}% YoY','tone':'green' if pc>=0 else 'red'}
+                    end=pd.Timestamp(col).date().isoformat()
+                    out['results'].append({'announcedOn':end,'periodEnd':end,'profit':profit,'priorProfit':prior,'change':change,
+                                           'source':'https://finance.yahoo.com/quote/'+sym+'.NS/financials','via':'Quarter ended','status':'yahoo'})
+        except Exception:pass
+    except Exception:pass
+    if out.get('cap') or out['results'] or out.get('debt'):spk_write('fund:'+sym,out)
+    return out
 
 
 def spk_combine_days(seed,additional):
@@ -3869,14 +3955,15 @@ def render_stock_peaks():
     if start>end or (end-start).days>93:st.error('Select a valid update window of up to 93 calendar days.');return
     prefix=start.isoformat()+':'+end.isoformat();days=[(start+timedelta(days=n)).isoformat() for n in range((min(end,today)-start).days+1) if (start+timedelta(days=n)).weekday()<5]
     status=spk_read('status:'+prefix) or {};actions=st.columns(4)
-    if actions[0].button('Update missing daily reports · 5 at a time',key='spk_update'):
-        todo=[day for day in days if spk_read('day:'+day) is None][:5];errors=[]
-        with loading_stopwatch('Fetching up to five missing NSE daily reports…'):
-            for day in todo:
-                try:spk_write('day:'+day,spk_fetch_day(day))
-                except Exception as exc:errors.append(day+': '+str(exc))
+    # First visit each day: automatically load every missing report, deal, brokerage and news item.
+    do_auto=status.get('auto')!=today.isoformat()
+    if st.button('🔄 Refresh everything now',key='spk_all'):
+        status['auto']='';spk_write('status:'+prefix,status);st.rerun()
+    if actions[0].button('Update ALL missing daily reports',key='spk_update') or do_auto:
+        with loading_stopwatch('Fetching every missing NSE daily report in parallel…'):
+            errors=spk_fetch_missing(days)
         status.update(prices=datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(),price_errors=errors);spk_write('status:'+prefix,status)
-    if actions[1].button('Update bulk / block deals',key='spk_deals'):
+    if actions[1].button('Update bulk / block deals',key='spk_deals') or do_auto:
         old=spk_read('deals:'+prefix) or {'rows':[]};errors=[];rows=list(old['rows'])
         if start<=today:
             with loading_stopwatch('Fetching bulk and block deals…'):
@@ -3891,12 +3978,12 @@ def render_stock_peaks():
     data=json.loads(match.group(2));companies=dict(data['names'])
     catalog=spk_read('catalog') or {}
     companies.update(catalog)
-    if actions[2].button('Update brokerage reports',key='spk_brokers'):
+    if actions[2].button('Update brokerage reports',key='spk_brokers') or do_auto:
         with loading_stopwatch('Fetching sourced brokerage headlines…'):
             try:
                 fetched=mc_fetch_broker_month(start,end,companies);spk_write('brokers:'+prefix,fetched)
             except Exception as exc:st.warning('Brokerage update failed; saved data retained: '+str(exc))
-    if actions[3].button('Update Stocks to Watch news',key='spk_news'):
+    if actions[3].button('Update Stocks to Watch news',key='spk_news') or do_auto:
         with loading_stopwatch('Fetching public Stocks to Watch headlines…'):
             try:
                 articles=google_news_rss('"stocks to watch" India after:'+start.isoformat()+' before:'+(end+timedelta(days=1)).isoformat(),limit=100)
@@ -3904,6 +3991,8 @@ def render_stock_peaks():
                 if not articles:raise ValueError('No RSS records returned; coverage is unconfirmed.')
                 spk_write('news:'+prefix,{'rows':articles,'updated':datetime.now(ZoneInfo('Asia/Kolkata')).isoformat()})
             except Exception as exc:st.warning('News update unavailable; saved edition retained: '+str(exc))
+    if do_auto:
+        status['auto']=today.isoformat();spk_write('status:'+prefix,status)
     with st.expander('Import NSE daily report CSV / ZIP when online download is blocked'):
         stamp=st.date_input('Report trading date',min(end,today),format='DD/MM/YYYY',key='spk_import_date')
         upload=st.file_uploader('Daily bhavcopy CSV or ZIP',type=['csv','zip'],key='spk_report')
@@ -3915,7 +4004,8 @@ def render_stock_peaks():
                 else:frame=pd.read_csv(upload)
                 frame.columns=frame.columns.str.strip();report=spk_normalize_bhav(frame,stamp.isoformat());spk_write('day:'+stamp.isoformat(),report);st.success('Saved report.');
             except Exception as exc:st.error(str(exc))
-    loaded=[spk_read('day:'+day) for day in days];loaded=[r for r in loaded if r]
+    loaded_all=[spk_read('day:'+day) for day in days];loaded_all=[r for r in loaded_all if r]
+    loaded=[r for r in loaded_all if r.get('status')=='ok'];holidays=[r['date'] for r in loaded_all if r.get('status')=='holiday']
     # Refresh latest report explicitly, including when the selected window is historical.
     if st.button('Refresh latest completed daily report',key='spk_latest'):
         errors=[]
@@ -3926,7 +4016,7 @@ def render_stock_peaks():
                 report=spk_fetch_day(day.isoformat());spk_write('latest',report);break
             except Exception as exc:errors.append(str(exc))
         else:st.warning('Latest daily report unavailable; saved closing prices kept.')
-    latest=spk_read('latest');additional=loaded+([latest] if latest else [])
+    latest=spk_read('latest');additional=loaded_all+([latest] if latest else [])
     for r in additional:companies.update(r.get('names',{}))
     if additional:spk_write('catalog',companies)
     data['names']=companies
@@ -3950,12 +4040,25 @@ def render_stock_peaks():
             except Exception:continue
             if url in seen or not start.isoformat()<=day<=end.isoformat():continue
             symbols=mc_match_symbols(title,companies)
-            data['news']['articles'].append({'date':day,'publishedAt':published.isoformat(),'title':title,'url':url,'publisher':a.get('source','Public RSS'),'stocks':[{'symbol':symbol,'company':companies[symbol],'signal':'neutral','basis':'headline-only','reason':'Headline available. No structured financial figures verified; read the source.'} for symbol in symbols]});seen.add(url)
+            data['news']['articles'].append({'date':day,'publishedAt':published.isoformat(),'title':title,'url':url,'publisher':a.get('source','Public RSS'),'stocks':[{'symbol':symbol,'company':companies[symbol],'signal':'neutral','basis':'headline-only','reason':title[:170]} for symbol in symbols]});seen.add(url)
         data['news']['articles'].sort(key=lambda r:r['date'])
     deals=spk_read('deals:'+prefix) or {};data['deals']=deals.get('rows',[])
     for error in status.get('price_errors',[])+deals.get('errors',[]):st.warning(error)
-    st.caption(str(len(loaded))+'/'+str(len(days))+' selected weekdays have newly loaded full-market reports. Weekdays can include market holidays. Missing dates are not silently counted as zero. Saved September archive remains available. Latest values are daily closes, not streaming quotes.')
+    st.caption(str(len(loaded))+' full-market reports loaded + '+str(len(holidays))+' market holidays detected out of '+str(len(days))+' weekdays. Missing dates are not silently counted as zero. Saved September archive remains available. Latest values are daily closes, not streaming quotes.')
     st.info('The summary confirms only loaded evidence. Quarterly numbers, debt and orders are not automatically refreshed by this version; unverified fields stay unavailable. RSS/brokerage coverage is partial.')
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        top=spk_top_symbols(data['prices']['days'],start.isoformat(),end.isoformat(),60)
+        with loading_stopwatch('Loading market cap, debt and quarterly results for top gainers…'):
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                fundamentals=dict(zip(top,pool.map(spk_fund,top)))
+        data['fund']={k:{x:v[x] for x in ('cap','debt','de','cash') if x in v} for k,v in fundamentals.items()}
+        for sym,v in fundamentals.items():
+            ev=data['events'].get(sym)
+            if v.get('results') and not (ev and ev.get('results')):
+                data['events'][sym]={'symbol':sym,'results':v['results'],'orders':(ev or {}).get('orders',[]),'financialStatus':'ok','orderStatus':'ok'}
+    except Exception as exc:
+        st.warning('Fundamentals unavailable right now: '+str(exc))
     payload=json.dumps(data,ensure_ascii=False).replace('</','<\\/')
     source=source[:match.start(2)]+payload+source[match.end(2):]
     source=source.replace("period={start:'2026-09-01',end:'2026-09-30'}","period={start:'"+start.isoformat()+"',end:'"+end.isoformat()+"'}")
@@ -3963,6 +4066,17 @@ def render_stock_peaks():
     source=source.replace('value="01/09/2026"','value="'+start.strftime('%d/%m/%Y')+'"').replace('value="30/09/2026"','value="'+end.strftime('%d/%m/%Y')+'"').replace('value="2026-09"','value="'+start.strftime('%Y-%m')+'"')
     source=source.replace('Single HTML · saved data through 22/10/2026.','NSE Pro · saved reports plus your explicit updates.').replace('Full NSE screening data is included for September 2026; additional dates contain the available news-company price archive.','Loaded coverage is shown above. Missing dates may have incomplete stock coverage.')
     source=source.replace('Full-universe data is included for September; other dates cover available news stocks only.','Only available reports are used. Check coverage above before comparing a full market.')
+    helper=("const FUND=DATA.fund||{};const crore=v=>Number.isFinite(v)?money(v/10000000)+' crore':null;"
+            "function capHTML(r){const f=FUND[r.symbol]||{};return f.cap?'<strong>'+crore(f.cap)+'</strong><small>Yahoo Finance</small>':'<small>Not reported by data provider</small>';}"
+            "function debtHTML(r){const f=FUND[r.symbol]||{};if(f.debt==null&&f.de==null)return '<small>Not reported by data provider</small>';"
+            "return (f.debt!=null?'<strong>'+crore(f.debt)+'</strong>':'')+(f.de!=null?'<small>Debt/Equity '+f.de.toFixed(1)+'%</small>':'');}"
+            "function ordersFallback(r){const n=(periodNews[r.symbol]||[]).filter(x=>/order|contract|bags|wins|secures|deal/i.test(x.reason||''));"
+            "return n.length?n.map(x=>link(x.url,dmy(x.date)+' · order headline')).join('<br>'):'<small>No order headlines in loaded news</small>';}")
+    source=source.replace("function resultHTML(r){",helper+"function resultHTML(r){",1)
+    source=source.replace('<td><small>Server feed required</small></td><td class="down"><small>Server feed required</small></td>','<td>${capHTML(r)}</td><td>${debtHTML(r)}</td>')
+    source=source.replace("'<small>Server feed required</small>';}","ordersFallback(r);}")
+    source=source.replace("'Announced '+dmy(e.announcedOn)","(e.via||'Announced')+' '+dmy(e.announcedOn)")
+    source=source.replace('<small>Upcoming date: not in snapshot</small>','')
     components.html(source,height=1300,scrolling=True)
 
 
