@@ -101,24 +101,74 @@ NSE_URL="https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 HEADERS={"User-Agent":"Mozilla/5.0"}
 FALLBACK=["RELIANCE","TCS","HDFCBANK","ICICIBANK","INFY","ITC","SBIN","LT","AXISBANK","SUZLON","TBZ"]
 
+UNIVERSE_DISK=Path("/tmp/nse_universe_cache.json")
+NSE_URLS=[NSE_URL,"https://archives.nseindia.com/content/equities/EQUITY_L.csv"]
+INDEX_FILES={"NIFTY 50":"ind_nifty50list.csv","NIFTY 100":"ind_nifty100list.csv","NIFTY 200":"ind_nifty200list.csv",
+             "NIFTY 500":"ind_nifty500list.csv","NIFTY Midcap":"ind_niftymidcap150list.csv","NIFTY Smallcap":"ind_niftysmallcap250list.csv"}
+
+def _nse_session():
+    s=requests.Session();s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36","Accept":"text/csv,*/*"})
+    try:s.get("https://www.nseindia.com",timeout=8)
+    except Exception:pass
+    return s
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def universe():
+    sess=_nse_session()
+    for url in NSE_URLS:
+        for _ in range(2):
+            try:
+                r=sess.get(url,timeout=20);r.raise_for_status()
+                d=pd.read_csv(io.BytesIO(r.content));d.columns=[str(c).strip() for c in d.columns]
+                out=d["SYMBOL"].astype(str).str.strip().str.upper().drop_duplicates().tolist()
+                if len(out)>500:
+                    try:UNIVERSE_DISK.write_text(json.dumps(out))
+                    except Exception:pass
+                    return out
+            except Exception:
+                time.sleep(0.7)
     try:
-        s=requests.Session(); s.headers.update(HEADERS)
-        try:s.get("https://www.nseindia.com",timeout=8)
-        except:pass
-        r=s.get(NSE_URL,timeout=15); r.raise_for_status()
-        d=pd.read_csv(io.BytesIO(r.content)); d.columns=[str(c).strip() for c in d.columns]
-        return d["SYMBOL"].astype(str).str.strip().drop_duplicates().tolist()
-    except:
-        return FALLBACK
+        out=json.loads(UNIVERSE_DISK.read_text())
+        if len(out)>500:return out
+    except Exception:pass
+    return FALLBACK
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def index_universe(name):
+    """Real index constituents (NIFTY 50/100/200/500/Midcap150/Smallcap250); falls back to None."""
+    fname=INDEX_FILES.get(name)
+    if not fname:return None
+    sess=_nse_session()
+    for url in (f"https://www.niftyindices.com/IndexConstituent/{fname}",f"https://nsearchives.nseindia.com/content/indices/{fname}"):
+        try:
+            r=sess.get(url,timeout=15);r.raise_for_status()
+            d=pd.read_csv(io.BytesIO(r.content));d.columns=[str(c).strip() for c in d.columns]
+            col=next((c for c in d.columns if c.lower()=="symbol"),None)
+            if col:
+                out=d[col].astype(str).str.strip().str.upper().drop_duplicates().tolist()
+                if len(out)>=20:return out
+        except Exception:
+            continue
+    return None
 
 @st.cache_data(ttl=900, show_spinner=False)
 def one_stock(sym, period):
-    t=sym+".NS"
-    d=yf.download(t,period=period,interval="1d",auto_adjust=False,progress=False,threads=False)
+    t=sym+".NS";d=None
+    for _ in range(2):
+        try:
+            d=yf.download(t,period=period,interval="1d",auto_adjust=False,progress=False,threads=False,timeout=15)
+            if d is not None and not d.empty:break
+        except Exception:
+            d=None;time.sleep(0.8)
+    if d is None or d.empty:return pd.DataFrame(columns=["Open","High","Low","Close","Volume"])
     if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
-    return d[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
+    d=d.loc[:,~d.columns.duplicated()]
+    keep=[c for c in ["Open","High","Low","Close","Volume"] if c in d.columns]
+    out=d[keep].dropna(subset=["Close"])
+    for c in ["Open","High","Low"]:
+        if c not in out.columns:out[c]=out["Close"]
+    if "Volume" not in out.columns:out["Volume"]=0
+    return out[["Open","High","Low","Close","Volume"]]
 
 def ind(d):
     x=d.copy(); c=x.Close
@@ -157,10 +207,12 @@ def market_cache_worksheet():
         tab.update(values=[MARKET_CACHE_HEADER],range_name="A1:G1",raw=True)
     return tab
 
+@st.cache_resource(show_spinner=False)
+def _shared_cache_holder():
+    return {"loaded":False,"records":{},"positions":{},"sheet":None,"next_row":2,"fetched_at":{},"failed":{}}
+
 def market_cache_state():
-    if "shared_nse_price_cache" not in st.session_state:
-        st.session_state.shared_nse_price_cache={"loaded":False,"records":{},"positions":{},"sheet":None,"next_row":2}
-    state=st.session_state.shared_nse_price_cache
+    state=_shared_cache_holder()
     if state["loaded"]:
         return state
     try:
@@ -253,7 +305,7 @@ def limited_price_download(tickers,**options):
     state=price_request_state()
     with state['lock']:
         if time.monotonic()<state['until']:raise PriceRateLimited('Price requests paused for five minutes after rate limiting.')
-        delay=1.0-(time.monotonic()-state['last'])
+        delay=0.6-(time.monotonic()-state['last'])
         if delay>0:time.sleep(delay)
         handler=PriceLimitLog();logger=logging.getLogger('yfinance');logger.addHandler(handler)
         try:
@@ -267,19 +319,39 @@ def limited_price_download(tickers,**options):
         if handler.limited:state['until']=time.monotonic()+300
         return result,handler.limited
 
+def _fetch_batch(batch,opts):
+    tickers=[symbol+'.NS' for symbol in batch];out={};limited=False
+    downloaded,limited=limited_price_download(tickers,interval='1d',group_by='ticker',auto_adjust=False,progress=False,**opts)
+    for symbol,ticker in zip(batch,tickers):
+        frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
+        if not frame.empty and 'Close' in frame and frame['Close'].notna().any():out[symbol]=frame
+    return out,limited
+
 def market_cache_fetch(symbols,start=None):
-    result={}
+    result={};opts={'start':start} if start else {'period':'5y'};empty_streak=0
     for offset in range(0,len(symbols),70):
-        batch=symbols[offset:offset+70];tickers=[symbol+'.NS' for symbol in batch]
-        opts={'start':start} if start else {'period':'5y'}
+        batch=symbols[offset:offset+70]
         try:
-            downloaded,limited=limited_price_download(tickers,interval='1d',group_by='ticker',auto_adjust=False,progress=False,**opts)
-        except Exception:
+            got,limited=_fetch_batch(batch,opts)
+        except PriceRateLimited:
             break
-        for symbol,ticker in zip(batch,tickers):
-            frame=market_cache_frame(downloaded,symbol,ticker,len(batch))
-            if not frame.empty and 'Close' in frame:result[symbol]=frame
-        if limited or not result:break
+        except Exception:
+            time.sleep(1.0)
+            try:got,limited=_fetch_batch(batch,opts)   # one retry instead of silently dropping the batch
+            except Exception:continue
+        result.update(got)
+        if limited:break
+        empty_streak=empty_streak+1 if not got else 0
+        if empty_streak>=3:break
+    # second pass: symbols a big batch silently dropped, in small groups
+    lost=[x for x in symbols if x not in result]
+    if lost and len(lost)<=140 and time.monotonic()>=price_request_state()['until']:
+        for offset in range(0,len(lost),20):
+            try:
+                got,limited=_fetch_batch(lost[offset:offset+20],opts);result.update(got)
+                if limited:break
+            except Exception:
+                break
     return result
 
 def market_cache_merge(previous,frame,checked):
@@ -342,27 +414,34 @@ def shared_market_snapshot(symbols,force_refresh=False):
     state=market_cache_state()
     symbols=list(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if symbol))
     checked=datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
-    missing=[symbol for symbol in symbols if symbol not in state["records"]]
+    now=time.monotonic();fetched_at=state.setdefault("fetched_at",{});failed=state.setdefault("failed",{})
+    # Symbols Yahoo had no data for are not retried for 6 hours (was retried on every run = slow).
+    missing=[symbol for symbol in symbols if symbol not in state["records"] and now-failed.get(symbol,-1e9)>21600]
+    # Stale = not checked today. Forced refresh only re-pulls records older than 5 minutes.
     stale=[symbol for symbol in symbols if symbol in state["records"] and
-           (force_refresh or state["records"][symbol]["checked"]!=checked)]
+           ((force_refresh and now-fetched_at.get(symbol,-1e9)>300) or state["records"][symbol]["checked"]!=checked)]
     changed=[]
-    for symbol,frame in market_cache_fetch(missing).items():
-        record=market_cache_merge(None,frame,checked)
+    got=market_cache_fetch(missing)
+    for symbol in missing:
+        frame=got.get(symbol);record=market_cache_merge(None,frame,checked) if frame is not None else None
         if record:
-            state["records"][symbol]=record;changed.append(symbol)
-    # Existing symbols fetch only the latest few days. Group by saved date so
-    # every Yahoo batch can share one start date and one network request.
-    groups={}
-    for symbol in stale:
-        last=state["records"][symbol]["last_date"]
-        start=(date.fromisoformat(last)-timedelta(days=5)).isoformat()
-        groups.setdefault(start,[]).append(symbol)
-    for start,group in groups.items():
-        fresh=market_cache_fetch(group,start=start)
+            state["records"][symbol]=record;changed.append(symbol);fetched_at[symbol]=now
+        elif frame is not None or got:   # only mark failed if the service actually answered
+            failed[symbol]=now
+    # Existing symbols: sort by saved date and chunk 70, one shared start date per chunk
+    # (previously one tiny request per distinct date = many slow round-trips).
+    def _start(sym):
+        return (date.fromisoformat(state["records"][sym]["last_date"])-timedelta(days=5)).isoformat()
+    stale.sort(key=_start)
+    for offset in range(0,len(stale),70):
+        group=stale[offset:offset+70]
+        fresh=market_cache_fetch(group,start=_start(group[0]))
+        if not fresh and group:continue    # service gave nothing: leave "checked" untouched so it retries later
         for symbol in group:
             old=state["records"][symbol]
-            record=market_cache_merge(old,fresh[symbol],checked) if symbol in fresh else dict(old,checked=checked)
-            state["records"][symbol]=record;changed.append(symbol)
+            if symbol in fresh:
+                record=market_cache_merge(old,fresh[symbol],checked) or old
+                state["records"][symbol]=record;changed.append(symbol);fetched_at[symbol]=now
     market_cache_save(state,changed)
     rows=[]
     for symbol in symbols:
@@ -376,8 +455,16 @@ def classic_period_snapshot(symbols_tuple,period):
     """Reuse saved per-period records and stop requests on rate limiting."""
     symbols=list(dict.fromkeys(symbols_tuple));state=price_request_state()
     saved=state['classic'].setdefault(period,{})
-    now=time.monotonic();todo=[symbol for symbol in symbols if symbol not in saved or now-saved[symbol]['saved_at']>=900]
-    checked=datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    now=time.monotonic();checked=datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    # Reuse records already stored in the shared (Google Sheet) cache when they were refreshed today: no download needed.
+    try:
+        shared=market_cache_state()['records']
+        for symbol in symbols:
+            rec=shared.get(symbol)
+            if rec and rec.get('checked')==checked and (symbol not in saved or now-saved[symbol]['saved_at']>=900):
+                saved[symbol]={'record':rec,'saved_at':now}
+    except Exception:pass
+    todo=[symbol for symbol in symbols if symbol not in saved or now-saved[symbol]['saved_at']>=900]
     progress=st.progress(0);status=st.empty();notice='';empty_batches=0
     try:
         for offset in range(0,len(todo),70):
@@ -399,6 +486,19 @@ def classic_period_snapshot(symbols_tuple,period):
                 notice='Price service rate-limited requests. Downloads paused for five minutes; saved prices are shown.';break
             if empty_batches>=2:
                 notice='Two batches returned no prices. Downloads stopped; saved prices are shown.';break
+        # Retry symbols that were dropped from big batches, in small groups.
+        if not notice:
+            lost=[x for x in todo if x not in saved][:200]
+            for offset in range(0,len(lost),25):
+                grp=lost[offset:offset+25];tick=[x+'.NS' for x in grp]
+                try:
+                    dl,limited=limited_price_download(tick,period=period,interval='1d',group_by='ticker',auto_adjust=False,progress=False)
+                except Exception:break
+                for symbol,ticker in zip(grp,tick):
+                    frame=market_cache_frame(dl,symbol,ticker,len(grp))
+                    record=market_cache_merge(None,frame,checked) if not frame.empty else None
+                    if record:saved[symbol]={'record':record,'saved_at':time.monotonic()}
+                if limited:break
     finally:progress.empty();status.empty()
     rows=[];failed=[]
     for symbol in symbols:
@@ -459,8 +559,13 @@ def run_screen(df,name):
 def google_news_rss(query, limit=25):
     url="https://news.google.com/rss/search?q="+quote_plus(query)+"&hl=en-IN&gl=IN&ceid=IN:en"
     try:
-        r=requests.get(url,headers=HEADERS,timeout=12)
-        r.raise_for_status()
+        r=None
+        for _ in range(2):
+            try:
+                r=requests.get(url,headers=HEADERS,timeout=10);r.raise_for_status();break
+            except Exception:
+                r=None;time.sleep(0.5)
+        if r is None:return []
         root=ET.fromstring(r.content)
         rows=[]
         for item in root.findall(".//item")[:limit]:
@@ -516,9 +621,8 @@ def symbol_from_headline(text, symbols):
 @st.cache_data(ttl=900, show_spinner=False)
 def current_and_call_price(symbol, call_date_text):
     try:
-        d=yf.download(symbol+".NS",period="1y",interval="1d",auto_adjust=False,progress=False,threads=False)
-        if isinstance(d.columns,pd.MultiIndex): d.columns=[c[0] for c in d.columns]
-        if d.empty:return None,None
+        d=one_stock(symbol,"1y")
+        if d is None or d.empty:return None,None
         cur=float(d["Close"].dropna().iloc[-1])
         call=None
         try:
@@ -1097,9 +1201,14 @@ def brokerage_tags_for_symbols(symbols_tuple):
     symbols=list(symbols_tuple)
     brokers=["Jefferies","Motilal Oswal","ICICI Securities","HDFC Securities","Axis Securities","CLSA","Nomura","Morgan Stanley","Goldman Sachs","JM Financial"]
     tags={s:[] for s in symbols}
-    for broker in brokers:
+    from concurrent.futures import ThreadPoolExecutor
+    def _feed(b):
+        try:return b,google_news_rss(f'"{b}" (buy OR target OR upgrade OR overweight) stock India',18)
+        except Exception:return b,[]
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        feeds=list(pool.map(_feed,brokers))
+    for broker,news in feeds:
         try:
-            news=google_news_rss(f'"{broker}" (buy OR target OR upgrade OR overweight) stock India',18)
             for n in news:
                 txt=(n.get("title","") or "")+" "+(n.get("description","") or "")
                 sym=symbol_from_headline(txt,symbols)
@@ -1629,8 +1738,15 @@ def us_price_metrics(frame, symbol):
 def us_download_batch(symbols,period="2y"):
     sym_list=list(symbols)
     if not sym_list:return pd.DataFrame()
-    data=yf.download(sym_list,period=period,interval='1d',auto_adjust=True,
-                     group_by='ticker',threads=4,progress=False,timeout=25)
+    data=pd.DataFrame()
+    for _ in range(2):
+        try:
+            data=yf.download(sym_list,period=period,interval='1d',auto_adjust=True,
+                             group_by='ticker',threads=4,progress=False,timeout=25)
+            if data is not None and not data.empty:break
+        except Exception:
+            time.sleep(1.0)
+    if data is None or data.empty:return pd.DataFrame()
     rows=[]
     for symbol in sym_list:
         try:
@@ -6382,13 +6498,18 @@ elif page=="🌐 All NSE Performance":
     )
 
     syms=universe()
-    if universe_group=="NIFTY 50": use_syms=syms[:50]
-    elif universe_group=="NIFTY 100": use_syms=syms[:100]
-    elif universe_group=="NIFTY 200": use_syms=syms[:200]
-    elif universe_group=="NIFTY 500": use_syms=syms[:500]
-    elif universe_group=="NIFTY Midcap": use_syms=syms[100:250]
-    elif universe_group=="NIFTY Smallcap": use_syms=syms[250:500]
-    else: use_syms=syms
+    use_syms=index_universe(universe_group) if universe_group!="All NSE" else None
+    if not use_syms:   # fallback only if the official index list is unreachable
+        if universe_group=="NIFTY 50": use_syms=syms[:50]
+        elif universe_group=="NIFTY 100": use_syms=syms[:100]
+        elif universe_group=="NIFTY 200": use_syms=syms[:200]
+        elif universe_group=="NIFTY 500": use_syms=syms[:500]
+        elif universe_group=="NIFTY Midcap": use_syms=syms[100:250]
+        elif universe_group=="NIFTY Smallcap": use_syms=syms[250:500]
+        else: use_syms=syms
+    else:
+        use_syms=[x for x in use_syms if x]
+        st.caption(f"Universe: {len(use_syms):,} official {universe_group} constituents")
 
     if view=="📈 Steady Uptrend":
         render_nse_steady_view(universe_group,use_syms)
@@ -6493,7 +6614,7 @@ elif page=="🌐 All NSE Performance":
 
         if st.button("⚡ Scan NSE Market",type="primary",use_container_width=True,key="smart_scan"):
             with loading_stopwatch("Scanning selected universe..."):
-                d=bulk_snapshot(tuple(use_syms),history,force_refresh=True)
+                d=bulk_snapshot(tuple(use_syms),history,force_refresh=True)  # forced only for records older than 5 min
 
             if isinstance(d,pd.DataFrame) and not d.empty:
                 for col in ["Latest","1D %","1W %","1M %","3M %","6M %","1Y %","5Y %","RSI14","SMA20","SMA50","SMA200","52W High","52W Low","% of 52W High","Volume"]:
